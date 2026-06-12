@@ -8,6 +8,11 @@ from typing import List, Dict, Any
 import streamlit as st
 from PIL import Image
 from google.cloud import vision
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 USER_ROLE = "을"
@@ -410,6 +415,49 @@ def analyze_contract_text(text: str) -> Dict[str, Any]:
         "확인할_질문": questions
     }
 
+def create_pdf_report(analysis_result):
+    pdf_path = "legal_analysis_report.pdf"
+
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("법률문서 OCR 분석 보고서", styles["Title"]))
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph(f"문서 종류: {analysis_result.get('document_type', '기타')}", styles["Normal"]))
+    story.append(Paragraph(f"판별 신뢰도: {analysis_result.get('document_confidence', 0)}%", styles["Normal"]))
+    story.append(Paragraph(f"분석 기준: {analysis_result.get('user_role', '을')}", styles["Normal"]))
+    story.append(Spacer(1, 16))
+
+    story.append(Paragraph("유리한 조항", styles["Heading2"]))
+    for idx, item in enumerate(analysis_result.get("유리한_조항", []), 1):
+        story.append(Paragraph(f"{idx}. {item['title']}", styles["Heading3"]))
+        story.append(Paragraph(f"이유: {item['explanation']}", styles["Normal"]))
+        story.append(Paragraph(f"쉬운 설명: {item['easy']}", styles["Normal"]))
+        for ev in item.get("evidence", []):
+            story.append(Paragraph(f"근거: {ev}", styles["Normal"]))
+        story.append(Spacer(1, 10))
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("불리한 조항", styles["Heading2"]))
+    for idx, item in enumerate(analysis_result.get("불리한_조항", []), 1):
+        story.append(Paragraph(f"{idx}. {item['title']} / 위험도 {item['severity']}/5", styles["Heading3"]))
+        story.append(Paragraph(f"이유: {item['explanation']}", styles["Normal"]))
+        story.append(Paragraph(f"쉬운 설명: {item['easy']}", styles["Normal"]))
+        for ev in item.get("evidence", []):
+            story.append(Paragraph(f"근거: {ev}", styles["Normal"]))
+        story.append(Spacer(1, 10))
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("확인할 질문", styles["Heading2"]))
+    for idx, q in enumerate(analysis_result.get("확인할_질문", []), 1):
+        story.append(Paragraph(f"{idx}. {q}", styles["Normal"]))
+
+    doc.build(story)
+
+    with open(pdf_path, "rb") as f:
+        return f.read()
 
 st.set_page_config(page_title="법률문서 OCR 분석기", layout="wide")
 
@@ -489,11 +537,12 @@ if uploaded_file:
 
         result_json = json.dumps(analysis_result, ensure_ascii=False, indent=2)
 
+        pdf_data = create_pdf_report(analysis_result)
         st.download_button(
-            label="분석 결과 JSON 다운로드",
-            data=result_json,
-            file_name="legal_analysis_result.json",
-            mime="application/json"
+            label="분석 보고서 PDF 다운로드",
+            data=pdf_data,
+            file_name="legal_analysis_report.pdf",
+            mime="application/pdf"
         )
 
         st.warning("이 결과는 법률 자문이 아니라 문서 이해를 돕기 위한 자동 분석입니다. 중요한 계약은 전문가 검토가 필요합니다.")
