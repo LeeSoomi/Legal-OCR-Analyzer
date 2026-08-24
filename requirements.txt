@@ -1,4 +1,5 @@
 streamlit
 google-cloud-vision
+google-auth
 Pillow
 reportlab
