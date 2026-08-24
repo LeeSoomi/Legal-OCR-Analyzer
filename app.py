@@ -24,6 +24,27 @@ def get_vision_client():
     try:
         gcp_info = dict(st.secrets["gcp_service_account"])
 
+        # Streamlit Secrets에서 \n이 문자 그대로 저장된 경우 실제 줄바꿈으로 변환
+        private_key = gcp_info.get("private_key", "")
+
+        if "\\n" in private_key:
+            private_key = private_key.replace("\\n", "\n")
+
+        private_key = private_key.strip()
+
+        # PEM 형식 확인
+        if not private_key.startswith("-----BEGIN PRIVATE KEY-----"):
+            raise ValueError(
+                "private_key가 올바른 PEM 형식으로 시작하지 않습니다."
+            )
+
+        if not private_key.endswith("-----END PRIVATE KEY-----"):
+            raise ValueError(
+                "private_key가 올바른 PEM 형식으로 끝나지 않습니다."
+            )
+
+        gcp_info["private_key"] = private_key
+
         credentials = service_account.Credentials.from_service_account_info(
             gcp_info
         )
@@ -41,7 +62,6 @@ def get_vision_client():
     except Exception as e:
         st.error(f"Google Cloud 인증 오류: {e}")
         st.stop()
-
 
 # ---------------------------------------------------------
 # 텍스트 정리
