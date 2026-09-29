@@ -2,6 +2,11 @@ import io
 import re
 import json
 from typing import List, Dict, Any
+from xml.sax.saxutils import escape
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.lib.styles import ParagraphStyle
+from openai import OpenAI
 
 import streamlit as st
 from PIL import Image
@@ -13,7 +18,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
 
-USER_ROLE = "을"
+USER_ROLE = "근로자"
 
 
 # ---------------------------------------------------------
@@ -690,7 +695,7 @@ UNFAVORABLE_RULES: List[Dict[str, Any]] = [
 # ---------------------------------------------------------
 
 def analyze_contract_text(
-    text: str
+    text: str, role: str = "근로자"
 ) -> Dict[str, Any]:
 
     text = normalize_text(text)
@@ -828,7 +833,7 @@ def analyze_contract_text(
             text,
 
         "user_role":
-            USER_ROLE,
+            role,
 
         "유리한_조항":
             pros,
@@ -848,14 +853,17 @@ def analyze_contract_text(
 def create_pdf_report(
     analysis_result
 ):
-    pdf_path = "legal_analysis_report.pdf"
+    pdf_buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
-        pdf_path,
+        pdf_buffer,
         pagesize=A4
     )
 
+    pdfmetrics.registerFont(UnicodeCIDFont("HYGothic-Medium"))
     styles = getSampleStyleSheet()
+    for style in styles.byName.values():
+        style.fontName = "HYGothic-Medium"
     story = []
 
     story.append(
@@ -872,7 +880,7 @@ def create_pdf_report(
     story.append(
         Paragraph(
             f"문서 종류: "
-            f"{analysis_result.get('document_type', '기타')}",
+            f"{escape(str(analysis_result.get('document_type', '기타')))}",
             styles["Normal"]
         )
     )
@@ -888,7 +896,7 @@ def create_pdf_report(
     story.append(
         Paragraph(
             f"분석 기준: "
-            f"{analysis_result.get('user_role', '을')}",
+            f"{escape(str(analysis_result.get('user_role', '근로자')))}",
             styles["Normal"]
         )
     )
@@ -914,21 +922,21 @@ def create_pdf_report(
 
         story.append(
             Paragraph(
-                f"{idx}. {item['title']}",
+                f"{idx}. {escape(item['title'])}",
                 styles["Heading3"]
             )
         )
 
         story.append(
             Paragraph(
-                f"이유: {item['explanation']}",
+                f"이유: {escape(item['explanation'])}",
                 styles["Normal"]
             )
         )
 
         story.append(
             Paragraph(
-                f"쉬운 설명: {item['easy']}",
+                f"쉬운 설명: {escape(item['easy'])}",
                 styles["Normal"]
             )
         )
@@ -939,7 +947,7 @@ def create_pdf_report(
         ):
             story.append(
                 Paragraph(
-                    f"근거: {ev}",
+                    f"근거: {escape(ev)}",
                     styles["Normal"]
                 )
             )
@@ -977,14 +985,14 @@ def create_pdf_report(
 
         story.append(
             Paragraph(
-                f"이유: {item['explanation']}",
+                f"이유: {escape(item['explanation'])}",
                 styles["Normal"]
             )
         )
 
         story.append(
             Paragraph(
-                f"쉬운 설명: {item['easy']}",
+                f"쉬운 설명: {escape(item['easy'])}",
                 styles["Normal"]
             )
         )
@@ -995,7 +1003,7 @@ def create_pdf_report(
         ):
             story.append(
                 Paragraph(
-                    f"근거: {ev}",
+                    f"근거: {escape(ev)}",
                     styles["Normal"]
                 )
             )
@@ -1025,291 +1033,188 @@ def create_pdf_report(
 
         story.append(
             Paragraph(
-                f"{idx}. {q}",
+                f"{idx}. {escape(q)}",
                 styles["Normal"]
             )
         )
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("AI 설명과 확인 질문", styles["Heading2"]))
+    for item in analysis_result.get("ai_items", []):
+        for line in (
+            f"{item['impact']} / {item['page']}페이지",
+            f"원문: {item['quote']}",
+            f"쉬운 설명: {item['explanation']}",
+            f"확인 질문: {item['question']}",
+        ):
+            story.append(Paragraph(escape(line), styles["Normal"]))
+        story.append(Spacer(1, 8))
 
     doc.build(
         story
     )
 
-    with open(
-        pdf_path,
-        "rb"
-    ) as f:
-        return f.read()
+    return pdf_buffer.getvalue()
 
 
 # ---------------------------------------------------------
-# Streamlit 화면
+# AI 설명: 원문 인용을 검증해 근거 없는 결과를 제외
 # ---------------------------------------------------------
-
-st.set_page_config(
-    page_title="법률문서 OCR 분석기",
-    layout="wide"
-)
-
-st.title(
-    "법률문서 OCR 유리·불리 조항 분석기"
-)
-
-st.write(
-    "법률문서 이미지를 업로드하면 OCR로 텍스트를 추출하고, "
-    "사용자(을) 기준으로 유리한 조항과 불리한 조항을 분석합니다."
-)
+ROLE_OPTIONS = {
+    "근로계약서": ["근로자", "고용주"],
+    "임대차계약서": ["임차인", "임대인"],
+    "프리랜서계약서": ["수탁자", "발주자"],
+    "용역계약서": ["수급인", "도급인"],
+    "개인정보동의서": ["정보주체", "개인정보처리자"],
+    "이용약관": ["이용자", "사업자"],
+    "기타": ["문서 이용자", "문서 작성자"],
+}
 
 
-uploaded_file = st.file_uploader(
-    "법률문서 이미지 업로드",
-    type=[
-        "png",
-        "jpg",
-        "jpeg"
-    ]
-)
-
-
-if uploaded_file:
-
-    image_bytes = uploaded_file.read()
-
-    image = Image.open(
-        io.BytesIO(image_bytes)
-    ).convert(
-        "RGB"
+def ai_feedback(pages, role, document_type, rules):
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        key = None
+    if not key:
+        return [], "OPENAI_API_KEY가 없어 규칙 분석만 표시합니다."
+    try:
+        model = st.secrets.get("OPENAI_MODEL", "gpt-5")
+    except Exception:
+        model = "gpt-5"
+    source = "\n\n".join(
+        f"[페이지 {i}]\n{page[:18000]}" for i, page in enumerate(pages, 1)
     )
-
-    col1, col2 = st.columns(
-        [1, 1]
+    source = source[:90000]
+    prompt = (
+        f"문서 종류: {document_type}; 사용자 입장: {role}\n"
+        "아래 OCR 문서만 근거로 최대 8개의 중요한 조건을 분석하라. "
+        "근로자·고용주 등 사용자의 입장에 따라 이익과 부담을 구분하되, "
+        "법적 효력이나 위법 여부를 단정하지 말라. OCR 오류, 빈칸, 누락은 확인 필요로 표시하라. "
+        "각 항목의 quote는 아래 문서에 실제로 존재하는 짧고 연속된 원문 구절이어야 한다. "
+        "반드시 JSON 객체 하나만 출력하라: "
+        '{"items":[{"page":1,"quote":"원문 그대로",'
+        '"impact":"유리|불리|확인 필요","explanation":"쉬운 설명",'
+        '"question":"확인 질문"}]}\n'
+        f"기존 규칙 분석: {json.dumps({'유리': [x['title'] for x in rules['유리한_조항']], '불리': [x['title'] for x in rules['불리한_조항']]}, ensure_ascii=False)}\n"
+        f"원문:\n{source}"
     )
-
-    with col1:
-
-        st.subheader(
-            "업로드한 이미지"
+    try:
+        response = OpenAI(api_key=key).responses.create(
+            model=model, input=prompt, store=False
         )
+        raw = response.output_text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        data = json.loads(raw)
+        verified = []
+        for item in data.get("items", []):
+            page = item.get("page")
+            quote = str(item.get("quote", "")).strip()
+            if not isinstance(page, int) or not 1 <= page <= len(pages):
+                continue
+            compact = lambda value: re.sub(r"\s+", "", value)
+            if len(compact(quote)) < 6 or compact(quote) not in compact(pages[page - 1]):
+                continue
+            if item.get("impact") not in ("유리", "불리", "확인 필요"):
+                continue
+            verified.append({
+                "page": page, "quote": quote, "impact": item["impact"],
+                "explanation": str(item.get("explanation", ""))[:700],
+                "question": str(item.get("question", ""))[:350],
+            })
+        return verified[:8], None if verified else "AI 결과에서 원문 근거를 확인할 수 없어 표시하지 않았습니다."
+    except Exception as exc:
+        return [], f"AI 설명에 실패했습니다: {type(exc).__name__}. 규칙 분석 결과는 유지됩니다."
 
-        st.image(
-            image,
-            use_container_width=True
-        )
 
-    with col2:
+st.set_page_config(page_title="AI 문해력 브릿지", layout="wide")
+st.title("AI 문해력 브릿지")
+st.write("서류 전체 페이지를 순서대로 촬영하거나 업로드하고, 분석할 입장을 선택하세요.")
 
-        st.subheader(
-            "분석 설정"
-        )
+if "captured_pages" not in st.session_state:
+    st.session_state.captured_pages = []
 
-        st.write(
-            "분석 기준: 사용자(을)"
-        )
+uploaded = st.file_uploader(
+    "사진 여러 장 업로드 (선택한 순서대로 분석)",
+    type=["png", "jpg", "jpeg"], accept_multiple_files=True
+)
+shot = st.camera_input("현재 페이지 촬영")
+if shot is not None:
+    shot_bytes = shot.getvalue()
+    if st.button("촬영한 페이지 추가"):
+        if shot_bytes not in st.session_state.captured_pages:
+            st.session_state.captured_pages.append(shot_bytes)
+        st.rerun()
+if st.session_state.captured_pages and st.button("촬영 목록 비우기"):
+    st.session_state.captured_pages = []
+    st.rerun()
 
-        run = st.button(
-            "OCR 및 분석 실행"
-        )
-
-
-    if run:
-
-        try:
-
-            with st.spinner(
-                "OCR 처리 중입니다..."
-            ):
-
-                ocr_text = extract_text_from_image(
-                    image_bytes
-                )
-
-                ocr_text = normalize_text(
-                    ocr_text
-                )
-
-            analysis_result = analyze_contract_text(
-                ocr_text
-            )
-
-        except Exception as e:
-
-            st.error(
-                f"OCR 또는 분석 중 오류가 발생했습니다: {e}"
-            )
-
+images = [f.getvalue() for f in (uploaded or [])] + st.session_state.captured_pages
+st.write(f"현재 {len(images)}페이지. 순서가 맞는지 아래 미리보기로 확인하세요.")
+if images:
+    for index, image_bytes in enumerate(images, 1):
+        with st.expander(f"{index}페이지 미리보기"):
+            st.image(image_bytes, width=400)
+    doc_choice = st.selectbox("문서 유형", list(ROLE_OPTIONS))
+    role = st.selectbox("나의 입장", ROLE_OPTIONS[doc_choice])
+    if st.button("전체 페이지 분석", type="primary"):
+        page_texts = []
+        for index, image_bytes in enumerate(images, 1):
+            try:
+                # EXIF 회전 및 이미지 인코딩 문제를 통일한다.
+                with Image.open(io.BytesIO(image_bytes)) as im:
+                    im.verify()
+                with st.spinner(f"{index}/{len(images)}페이지 OCR 처리 중"):
+                    page_texts.append(normalize_text(extract_text_from_image(image_bytes)))
+            except Exception as exc:
+                st.error(f"{index}페이지를 읽지 못했습니다: {exc}")
+                st.stop()
+        if not any(page_texts):
+            st.error("읽힌 글자가 없습니다. 사진을 다시 촬영해 주세요.")
             st.stop()
-
-
-        st.divider()
-
-        st.subheader(
-            "문서 종류 판별 결과"
+        combined = "\n\n".join(
+            f"[페이지 {i}]\n{text}" for i, text in enumerate(page_texts, 1)
         )
+        result = analyze_contract_text(combined, role)
+        result["user_role"] = role
+        result["selected_document_type"] = doc_choice
+        result["ocr_page_texts"] = page_texts
+        with st.spinner("원문에 근거한 쉬운 설명 생성 중"):
+            ai_items, ai_error = ai_feedback(page_texts, role, doc_choice, result)
+        result["ai_items"] = ai_items
+        result["ai_error"] = ai_error
+        st.session_state.analysis_result = result
 
-        st.write(
-            f"문서 종류: "
-            f"{analysis_result['document_type']}"
-        )
-
-        st.write(
-            f"판별 신뢰도: "
-            f"{analysis_result['document_confidence']}%"
-        )
-
-
-        with st.expander(
-            "문서 종류별 점수 보기"
-        ):
-            st.json(
-                analysis_result[
-                    "document_scores"
-                ]
-            )
-
-
-        st.divider()
-
-        st.subheader(
-            "OCR 추출 텍스트"
-        )
-
-        st.text_area(
-            "추출된 텍스트",
-            ocr_text,
-            height=280
-        )
-
-
-        st.divider()
-
-        st.subheader(
-            "유리한 조항"
-        )
-
-
-        if not analysis_result[
-            "유리한_조항"
-        ]:
-
-            st.info(
-                "탐지된 유리한 조항이 없습니다."
-            )
-
-        else:
-
-            for item in analysis_result[
-                "유리한_조항"
-            ]:
-
-                with st.container(
-                    border=True
-                ):
-
-                    st.markdown(
-                        f"### {item['title']}"
-                    )
-
-                    st.write(
-                        f"이유: "
-                        f"{item['explanation']}"
-                    )
-
-                    st.write(
-                        f"쉬운 설명: "
-                        f"{item['easy']}"
-                    )
-
-                    for ev in item[
-                        "evidence"
-                    ]:
-
-                        st.write(
-                            f"근거: {ev}"
-                        )
-
-
-        st.divider()
-
-        st.subheader(
-            "불리한 조항"
-        )
-
-
-        if not analysis_result[
-            "불리한_조항"
-        ]:
-
-            st.info(
-                "탐지된 불리한 조항이 없습니다."
-            )
-
-        else:
-
-            for item in analysis_result[
-                "불리한_조항"
-            ]:
-
-                with st.container(
-                    border=True
-                ):
-
-                    st.markdown(
-                        f"### {item['title']} "
-                        f"/ 위험도 "
-                        f"{item['severity']}/5"
-                    )
-
-                    st.write(
-                        f"이유: "
-                        f"{item['explanation']}"
-                    )
-
-                    st.write(
-                        f"쉬운 설명: "
-                        f"{item['easy']}"
-                    )
-
-                    for ev in item[
-                        "evidence"
-                    ]:
-
-                        st.write(
-                            f"근거: {ev}"
-                        )
-
-
-        st.divider()
-
-        st.subheader(
-            "확인할 질문"
-        )
-
-
-        for idx, q in enumerate(
-            analysis_result[
-                "확인할_질문"
-            ],
-            1
-        ):
-
-            st.write(
-                f"{idx}. {q}"
-            )
-
-
-        pdf_data = create_pdf_report(
-            analysis_result
-        )
-
-
-        st.download_button(
-            label="분석 보고서 PDF 다운로드",
-            data=pdf_data,
-            file_name="legal_analysis_report.pdf",
-            mime="application/pdf"
-        )
-
-
-        st.warning(
-            "이 결과는 법률 자문이 아니라 문서 이해를 돕기 위한 "
-            "자동 분석입니다. 중요한 계약은 전문가 검토가 필요합니다."
-        )
+result = st.session_state.get("analysis_result")
+if result:
+    st.subheader("분석 결과")
+    st.write(f"선택한 문서: {result['selected_document_type']} / 입장: {result['user_role']}")
+    st.write(f"OCR 판별: {result['document_type']} (키워드 일치율 {result['document_confidence']}%)")
+    if result['document_type'] != result['selected_document_type']:
+        st.warning("선택한 문서 유형과 OCR 판별이 다릅니다. 문서와 촬영 순서를 확인하세요.")
+    if result['ai_error']:
+        st.info(result['ai_error'])
+    st.subheader("AI 설명과 확인 질문")
+    for item in result['ai_items']:
+        with st.container(border=True):
+            st.write(f"{item['impact']} / {item['page']}페이지")
+            st.write(item['explanation'])
+            st.write(f"원문: {item['quote']}")
+            st.write(f"확인 질문: {item['question']}")
+    st.subheader("기존 규칙으로 찾은 항목")
+    st.caption("기존 규칙은 근로자·계약 상대방 관점에서 작성되어 있습니다. 다른 입장을 선택한 경우 유불리 판정 대신 탐지된 조항으로 검토하세요.")
+    for group in ("유리한_조항", "불리한_조항"):
+        with st.expander(f"{group}: {len(result[group])}개"):
+            for item in result[group]:
+                st.write(f"{item['title']}: {item['easy']}")
+                for quote in item['evidence']:
+                    st.write(f"근거: {quote}")
+    with st.expander("페이지별 OCR 원문"):
+        for i, page in enumerate(result['ocr_page_texts'], 1):
+            st.text_area(f"{i}페이지", page, height=180, key=f"ocr_{i}")
+    st.download_button(
+        "분석 PDF 다운로드", create_pdf_report(result),
+        file_name="bridge_analysis.pdf", mime="application/pdf"
+    )
+    st.caption("자동 분석은 문서 이해를 돕는 자료입니다. OCR 원문과 계약서 전체를 대조해 주세요.")
