@@ -1,4 +1,6 @@
 import io
+import hashlib
+import time
 import re
 import json
 from typing import List, Dict, Any
@@ -1079,18 +1081,20 @@ def ai_feedback(pages, role, document_type, rules):
     if not key:
         return [], "OPENAI_API_KEY가 없어 규칙 분석만 표시합니다."
     try:
-        model = st.secrets.get("OPENAI_MODEL", "gpt-5")
+        model = st.secrets.get("OPENAI_MODEL", "gpt-5-mini")
     except Exception:
-        model = "gpt-5"
+        model = "gpt-5-mini"
     source = "\n\n".join(
         f"[페이지 {i}]\n{page[:18000]}" for i, page in enumerate(pages, 1)
     )
     source = source[:90000]
     prompt = (
         f"문서 종류: {document_type}; 사용자 입장: {role}\n"
-        "아래 OCR 문서만 근거로 최대 8개의 중요한 조건을 분석하라. "
+        "아래 OCR 문서만 근거로 최대 6개의 중요한 조건을 분석하라. 설명은 항목당 2문장 이내, 질문은 1개로 간결하게 작성하라. "
         "근로자·고용주 등 사용자의 입장에 따라 이익과 부담을 구분하되, "
         "법적 효력이나 위법 여부를 단정하지 말라. OCR 오류, 빈칸, 누락은 확인 필요로 표시하라. "
+        "단순히 조건이 기재되어 있다는 이유만으로 유리로 분류하지 말라. 실제 이익 또는 부담의 근거가 부족하면 확인 필요로 분류하라. "
+        "체크박스의 선택 여부, 손글씨 숫자, 상여금 및 수당의 유무가 불명확하면 추정하지 말고 확인 필요로 분류하라. "
         "각 항목의 quote는 아래 문서에 실제로 존재하는 짧고 연속된 원문 구절이어야 한다. "
         "반드시 JSON 객체 하나만 출력하라: "
         '{"items":[{"page":1,"quote":"원문 그대로",'
@@ -1100,8 +1104,11 @@ def ai_feedback(pages, role, document_type, rules):
         f"원문:\n{source}"
     )
     try:
-        response = OpenAI(api_key=key).responses.create(
-            model=model, input=prompt, store=False
+        request_options = {}
+        if model in {"gpt-5", "gpt-5-mini", "gpt-5-nano"}:
+            request_options["reasoning"] = {"effort": "minimal"}
+        response = OpenAI(api_key=key, timeout=60.0, max_retries=0).responses.create(
+            model=model, input=prompt, store=False, **request_options
         )
         raw = response.output_text.strip()
         if raw.startswith("```"):
@@ -1123,7 +1130,7 @@ def ai_feedback(pages, role, document_type, rules):
                 "explanation": str(item.get("explanation", ""))[:700],
                 "question": str(item.get("question", ""))[:350],
             })
-        return verified[:8], None if verified else "AI 결과에서 원문 근거를 확인할 수 없어 표시하지 않았습니다."
+        return verified[:6], None if verified else "AI 결과에서 원문 근거를 확인할 수 없어 표시하지 않았습니다."
     except Exception as exc:
         return [], f"AI 설명에 실패했습니다: {type(exc).__name__}. 규칙 분석 결과는 유지됩니다."
 
@@ -1168,7 +1175,16 @@ if images:
                 st.caption(f"원본 크기: {preview_image.width} × {preview_image.height} 픽셀")
     doc_choice = st.selectbox("문서 유형", list(ROLE_OPTIONS))
     role = st.selectbox("나의 입장", ROLE_OPTIONS[doc_choice])
+    input_signature = hashlib.sha256(
+        (doc_choice + "|" + role).encode() + b"".join(
+            hashlib.sha256(data).digest() for data in images
+        )
+    ).hexdigest()
+    if st.session_state.get("analysis_signature") != input_signature:
+        st.session_state.pop("analysis_result", None)
     if st.button("전체 페이지 분석", type="primary"):
+        analysis_started = time.perf_counter()
+        ocr_cache = st.session_state.setdefault("ocr_cache", {})
         page_texts = []
         for index, image_bytes in enumerate(images, 1):
             try:
@@ -1176,7 +1192,12 @@ if images:
                 with Image.open(io.BytesIO(image_bytes)) as im:
                     im.verify()
                 with st.spinner(f"{index}/{len(images)}페이지 OCR 처리 중"):
-                    page_texts.append(normalize_text(extract_text_from_image(image_bytes)))
+                    image_key = hashlib.sha256(image_bytes).hexdigest()
+                    if image_key not in ocr_cache:
+                        if len(ocr_cache) >= 50:
+                            ocr_cache.pop(next(iter(ocr_cache)))
+                        ocr_cache[image_key] = normalize_text(extract_text_from_image(image_bytes))
+                    page_texts.append(ocr_cache[image_key])
             except Exception as exc:
                 st.error(f"{index}페이지를 읽지 못했습니다: {exc}")
                 st.stop()
@@ -1190,11 +1211,13 @@ if images:
         result["user_role"] = role
         result["selected_document_type"] = doc_choice
         result["ocr_page_texts"] = page_texts
-        with st.spinner("원문에 근거한 쉬운 설명 생성 중"):
-            ai_items, ai_error = ai_feedback(page_texts, role, doc_choice, result)
-        result["ai_items"] = ai_items
-        result["ai_error"] = ai_error
+        result["ai_items"] = []
+        result["ai_error"] = None
+        result["ai_pending"] = True
+        result["ocr_seconds"] = time.perf_counter() - analysis_started
         st.session_state.analysis_result = result
+        st.session_state.analysis_signature = input_signature
+        st.rerun()
 
 result = st.session_state.get("analysis_result")
 if result:
@@ -1207,7 +1230,17 @@ if result:
         st.info(result['ai_error'])
     if not result["유리한_조항"] and not result["불리한_조항"]:
         st.warning("기존 규칙에 일치하는 문구가 없습니다. 페이지별 OCR 원문에 글자가 정확히 읽혔는지 확인하세요.")
+    st.caption(f"OCR·규칙 분석: {result.get('ocr_seconds', 0):.1f}초")
+    if "ai_seconds" in result:
+        st.caption(f"AI 분석: {result['ai_seconds']:.1f}초")
     st.subheader("AI 설명과 확인 질문")
+    ai_status = st.empty()
+    if result.get("ai_pending"):
+        ai_status.info("OCR·규칙 분석이 완료되었습니다. AI 설명을 생성하고 있습니다.")
+    elif result.get("ai_error") and st.button("AI 분석 다시 시도"):
+        result["ai_pending"] = True
+        result["ai_error"] = None
+        st.rerun()
     for item in result['ai_items']:
         with st.container(border=True):
             st.write(f"{item['impact']} / {item['page']}페이지")
@@ -1230,3 +1263,17 @@ if result:
         file_name="bridge_analysis.pdf", mime="application/pdf"
     )
     st.caption("자동 분석은 문서 이해를 돕는 자료입니다. OCR 원문과 계약서 전체를 대조해 주세요.")
+
+    # 먼저 화면에 OCR·규칙 결과를 표시한 뒤 AI를 호출한다.
+    if result.get("ai_pending"):
+        ai_started = time.perf_counter()
+        with ai_status.container():
+            with st.spinner("원문에 근거한 AI 설명 생성 중"):
+                ai_items, ai_error = ai_feedback(
+                    result["ocr_page_texts"], result["user_role"],
+                    result["selected_document_type"], result
+                )
+        result.update(ai_items=ai_items, ai_error=ai_error,
+                      ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
+        st.session_state.analysis_result = result
+        st.rerun()
