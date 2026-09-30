@@ -852,210 +852,42 @@ def analyze_contract_text(
 # PDF 생성
 # ---------------------------------------------------------
 
-def create_pdf_report(
-    analysis_result
-):
+def create_pdf_report(analysis_result):
     pdf_buffer = io.BytesIO()
-
-    doc = SimpleDocTemplate(
-        pdf_buffer,
-        pagesize=A4
-    )
-
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
     pdfmetrics.registerFont(UnicodeCIDFont("HYGothic-Medium"))
     styles = getSampleStyleSheet()
     for style in styles.byName.values():
         style.fontName = "HYGothic-Medium"
     story = []
-
-    story.append(
-        Paragraph(
-            "법률문서 OCR 분석 보고서",
-            styles["Title"]
-        )
-    )
-
-    story.append(
-        Spacer(1, 12)
-    )
-
-    story.append(
-        Paragraph(
-            f"문서 종류: "
-            f"{escape(str(analysis_result.get('document_type', '기타')))}",
-            styles["Normal"]
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"판별 신뢰도: "
-            f"{analysis_result.get('document_confidence', 0)}%",
-            styles["Normal"]
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"분석 기준: "
-            f"{escape(str(analysis_result.get('user_role', '근로자')))}",
-            styles["Normal"]
-        )
-    )
-
-    story.append(
-        Spacer(1, 16)
-    )
-
-    story.append(
-        Paragraph(
-            "유리한 조항",
-            styles["Heading2"]
-        )
-    )
-
-    for idx, item in enumerate(
-        analysis_result.get(
-            "유리한_조항",
-            []
-        ),
-        1
-    ):
-
-        story.append(
-            Paragraph(
-                f"{idx}. {escape(item['title'])}",
-                styles["Heading3"]
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"이유: {escape(item['explanation'])}",
-                styles["Normal"]
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"쉬운 설명: {escape(item['easy'])}",
-                styles["Normal"]
-            )
-        )
-
-        for ev in item.get(
-            "evidence",
-            []
-        ):
-            story.append(
-                Paragraph(
-                    f"근거: {escape(ev)}",
-                    styles["Normal"]
-                )
-            )
-
-        story.append(
-            Spacer(1, 10)
-        )
-
-    story.append(
-        Spacer(1, 12)
-    )
-
-    story.append(
-        Paragraph(
-            "불리한 조항",
-            styles["Heading2"]
-        )
-    )
-
-    for idx, item in enumerate(
-        analysis_result.get(
-            "불리한_조항",
-            []
-        ),
-        1
-    ):
-
-        story.append(
-            Paragraph(
-                f"{idx}. {item['title']} "
-                f"/ 위험도 {item['severity']}/5",
-                styles["Heading3"]
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"이유: {escape(item['explanation'])}",
-                styles["Normal"]
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"쉬운 설명: {escape(item['easy'])}",
-                styles["Normal"]
-            )
-        )
-
-        for ev in item.get(
-            "evidence",
-            []
-        ):
-            story.append(
-                Paragraph(
-                    f"근거: {escape(ev)}",
-                    styles["Normal"]
-                )
-            )
-
-        story.append(
-            Spacer(1, 10)
-        )
-
-    story.append(
-        Spacer(1, 12)
-    )
-
-    story.append(
-        Paragraph(
-            "확인할 질문",
-            styles["Heading2"]
-        )
-    )
-
-    for idx, q in enumerate(
-        analysis_result.get(
-            "확인할_질문",
-            []
-        ),
-        1
-    ):
-
-        story.append(
-            Paragraph(
-                f"{idx}. {escape(q)}",
-                styles["Normal"]
-            )
-        )
-
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("AI 설명과 확인 질문", styles["Heading2"]))
+    def paragraph(text, style="Normal"):
+        story.append(Paragraph(escape(str(text)), styles[style]))
+        story.append(Spacer(1, 6))
+    paragraph("AI 문해력 브릿지 분석 보고서", "Title")
+    paragraph(f"선택 문서: {analysis_result.get('selected_document_type', '기타')}")
+    paragraph(f"분석 입장: {analysis_result.get('user_role', '근로자')}")
+    paragraph(f"OCR 문서 판별 키워드 일치율: {analysis_result.get('document_confidence', 0)}% (OCR 정확도가 아님)")
+    paragraph("AI 설명과 확인 질문", "Heading2")
+    if analysis_result.get("ai_pending"):
+        paragraph("AI 분석 진행 중입니다. 이 보고서에는 AI 결과가 아직 포함되지 않았습니다.")
+    if analysis_result.get("ai_error"):
+        paragraph(analysis_result["ai_error"])
     for item in analysis_result.get("ai_items", []):
-        for line in (
-            f"{item['impact']} / {item['page']}페이지",
-            f"원문: {item['quote']}",
-            f"쉬운 설명: {item['explanation']}",
-            f"확인 질문: {item['question']}",
-        ):
-            story.append(Paragraph(escape(line), styles["Normal"]))
-        story.append(Spacer(1, 8))
-
-    doc.build(
-        story
-    )
-
+        paragraph(f"{item['impact']} / {item['page']}페이지", "Heading3")
+        paragraph(item['explanation'])
+        if item.get("basis"):
+            paragraph(f"판단 근거: {item['basis']}")
+        paragraph(f"원문: {item['quote']}")
+        paragraph(f"확인 질문: {item['question']}")
+    paragraph("규칙으로 탐지한 항목", "Heading2")
+    paragraph("키워드·패턴 탐지 결과이며 선택한 입장의 유불리 판정이 아닙니다. 미탐지가 불리한 조건의 부재를 뜻하지 않습니다.")
+    for group in ("유리한_조항", "불리한_조항"):
+        for item in analysis_result.get(group, []):
+            paragraph(item['title'], "Heading3")
+            for quote in item.get("evidence", []):
+                paragraph(f"근거: {quote}")
+    paragraph("자동 분석은 문서 이해를 돕는 자료입니다. OCR 원문과 계약서 전체를 대조하세요.")
+    doc.build(story)
     return pdf_buffer.getvalue()
 
 
@@ -1093,14 +925,18 @@ def ai_feedback(pages, role, document_type, rules):
         "아래 OCR 문서만 근거로 최대 6개의 중요한 조건을 분석하라. 설명은 항목당 2문장 이내, 질문은 1개로 간결하게 작성하라. "
         "근로자·고용주 등 사용자의 입장에 따라 이익과 부담을 구분하되, "
         "법적 효력이나 위법 여부를 단정하지 말라. OCR 오류, 빈칸, 누락은 확인 필요로 표시하라. "
+        "시작일, 기간, 기본급, 근무시간, 지급일, 지급방식의 단순 기재는 basic 유형이며 반드시 확인 필요로 분류하라. "
+        "유리는 사용자에게 구체적인 추가 권리·혜택이 있는 경우, 불리는 구체적인 비용·권리 제한·책임 부담이 있는 경우에만 선택하라. "
+        "일반적인 의무를 이행하거나 기록·관리가 편리하다는 이유로 고용주에게 유리하다고 판단하지 말라. "
+        "assessment_kind는 benefit(구체적 혜택), burden(구체적 부담), basic(기본 정보), uncertain(불명확) 중 하나이며, basis에 판단 근거를 1문장으로 작성하라. "
         "단순히 조건이 기재되어 있다는 이유만으로 유리로 분류하지 말라. 실제 이익 또는 부담의 근거가 부족하면 확인 필요로 분류하라. "
         "체크박스의 선택 여부, 손글씨 숫자, 상여금 및 수당의 유무가 불명확하면 추정하지 말고 확인 필요로 분류하라. "
         "각 항목의 quote는 아래 문서에 실제로 존재하는 짧고 연속된 원문 구절이어야 한다. "
         "반드시 JSON 객체 하나만 출력하라: "
         '{"items":[{"page":1,"quote":"원문 그대로",'
-        '"impact":"유리|불리|확인 필요","explanation":"쉬운 설명",'
+        '"impact":"유리|불리|확인 필요","assessment_kind":"basic","basis":"판단 근거","explanation":"쉬운 설명",'
         '"question":"확인 질문"}]}\n'
-        f"기존 규칙 분석: {json.dumps({'유리': [x['title'] for x in rules['유리한_조항']], '불리': [x['title'] for x in rules['불리한_조항']]}, ensure_ascii=False)}\n"
+        f"규칙으로 탐지된 항목(유불리 정답이 아님): {json.dumps([x['title'] for group in ('유리한_조항', '불리한_조항') for x in rules[group]], ensure_ascii=False)}\n"
         f"원문:\n{source}"
     )
     try:
@@ -1125,8 +961,14 @@ def ai_feedback(pages, role, document_type, rules):
                 continue
             if item.get("impact") not in ("유리", "불리", "확인 필요"):
                 continue
+            kind = item.get("assessment_kind", "uncertain")
+            basis = str(item.get("basis", "")).strip()
+            impact = item["impact"]
+            expected_kind = {"유리": "benefit", "불리": "burden"}.get(impact)
+            if not basis or kind not in {"benefit", "burden"} or (expected_kind and kind != expected_kind):
+                impact = "확인 필요"
             verified.append({
-                "page": page, "quote": quote, "impact": item["impact"],
+                "page": page, "quote": quote, "impact": impact, "basis": basis[:350],
                 "explanation": str(item.get("explanation", ""))[:700],
                 "question": str(item.get("question", ""))[:350],
             })
@@ -1245,16 +1087,18 @@ if result:
         with st.container(border=True):
             st.write(f"{item['impact']} / {item['page']}페이지")
             st.write(item['explanation'])
+            if item.get("basis"):
+                st.write(f"판단 근거: {item['basis']}")
             st.write(f"원문: {item['quote']}")
             st.write(f"확인 질문: {item['question']}")
-    st.subheader("기존 규칙으로 찾은 항목")
-    st.caption("기존 규칙은 근로자·계약 상대방 관점에서 작성되어 있습니다. 다른 입장을 선택한 경우 유불리 판정 대신 탐지된 조항으로 검토하세요.")
-    for group in ("유리한_조항", "불리한_조항"):
-        with st.expander(f"{group}: {len(result[group])}개"):
-            for item in result[group]:
-                st.write(f"{item['title']}: {item['easy']}")
-                for quote in item['evidence']:
-                    st.write(f"근거: {quote}")
+    st.subheader("규칙으로 탐지한 항목")
+    st.caption("키워드와 패턴으로 찾은 문구입니다. 선택한 입장의 유불리 판정은 위 AI 설명에서 확인하세요. 항목이 없다고 불리한 조건이 없다는 뜻은 아닙니다.")
+    detected = result["유리한_조항"] + result["불리한_조항"]
+    with st.expander(f"탐지 항목: {len(detected)}개"):
+        for item in detected:
+            st.write(item['title'])
+            for quote in item['evidence']:
+                st.write(f"근거: {quote}")
     with st.expander("페이지별 OCR 원문"):
         for i, page in enumerate(result['ocr_page_texts'], 1):
             st.text_area(f"{i}페이지", page, height=180, key=f"ocr_{i}")
