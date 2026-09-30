@@ -875,6 +875,8 @@ def create_pdf_report(analysis_result):
     for item in analysis_result.get("ai_items", []):
         location = f"{item['page']}페이지" if item.get('page') else "원본 확인 필요"
         paragraph(f"{item.get('title', '검토 항목')} / {item['impact']} / {location}", "Heading3")
+        if item.get("check_reason") and item["impact"] == "확인 필요":
+            paragraph(f"확인 구분: {item['check_reason']}")
         paragraph(item['explanation'])
         if item.get("basis"):
             paragraph(f"판단 근거: {item['basis']}")
@@ -971,7 +973,17 @@ REVIEW_TOPICS = {
 def build_review_topics(pages, document_type):
     """입장과 무관하게 동일 원문에서 동일 후보를 구성한다."""
     topics = []
-    for topic_id, title, pattern in REVIEW_TOPICS.get(document_type, REVIEW_TOPICS["기타 문서"]):
+    definitions = list(REVIEW_TOPICS.get(document_type, REVIEW_TOPICS["기타 문서"]))
+    full_text = "\n".join(pages)
+    # 양식 문구는 검토 단서일 뿐 실제 연령·고용 형태의 확정 근거가 아니다.
+    if document_type == "근로계약서":
+        if re.search(r"연소|친권자|후견인|18\s*세\s*미만|미성년", full_text):
+            definitions.extend([
+                ("age_documents", "추가 검토: 연령·동의서·증명서", r"연소|친권자|후견인|동의서|가족관계|18\s*세\s*미만"),
+                ("youth_conditions", "추가 검토: 연소근로 관련 안내", r"연소|18\s*세\s*미만|야간|휴일근로")])
+        if re.search(r"단시간|시간제|일용|건설", full_text):
+            definitions.append(("work_form", "추가 검토: 근무 형태·일정", "단시간|시간제|일용|건설|근무일|근로시간"))
+    for topic_id, title, pattern in definitions:
         candidates = []
         for page_number, page in enumerate(pages, 1):
             for match in re.finditer(pattern, page):
@@ -1038,7 +1050,9 @@ def verify_review_items(generated, topics, pages):
             "topic_id": topic_id, "title": by_topic[topic_id]["title"],
             "page": page, "quote": quote, "impact": impact,
             "basis": item["basis"][:350], "explanation": item["explanation"][:700],
-            "question": item["question"][:350], "status": "verified"}
+            "question": item["question"][:350], "status": "verified",
+            "check_reason": item.get("check_reason") if item.get("check_reason") in
+                {"기본 정보", "기재 누락", "OCR 확인", "조건 확인"} else "조건 확인"}
     output = []
     for topic in topics:
         topic_id = topic["topic_id"]
@@ -1085,6 +1099,16 @@ def ai_feedback(pages, role, document_type, rules):
         "입장이 바뀌어도 항목 범위는 동일하다. 상대방의 유리를 사용자 불리로 자동 반전하지 말라. "
         "설명은 항목당 2문장 이내, 확인 질문은 선택한 입장에 필요한 질문 1개로 작성하라. "
         "OCR 원문만 근거로 사용하고 법적 효력·위법 여부를 단정하지 말라. "
+        "계약서 유형 이름을 미리 지정할 필요 없이 원문에서 기간제·단시간·일용·연소 관련 특성을 해석하라. 여러 특성이 동시에 존재할 수 있다. "
+        "양식의 참고 안내와 당사자가 작성한 실제 조건을 구분하라. 18세 미만 안내만으로 실제 근로자가 미성년자라고 단정하지 말라. "
+        "추가 검토 항목은 관련 문구의 의미와 실제 적용 여부를 설명하고, 다른 문구만으로 조건을 확정하지 말라. "
+        "check_reason은 기본 정보, 기재 누락, OCR 확인, 조건 확인 중 하나이다. 명확한 기본 정보는 정확한 내용을 설명하고 불필요한 재확인 질문 대신 실행·관리 질문을 하라. "
+        "기재 누락은 OCR상 공란이 보일 때만 사용하며 실제 원본도 공란인지는 단정하지 말라. OCR 확인은 문자·숫자·선택 표시를 읽기 어려운 경우이다. "
+        "26년은 문맥상 2026년을 의미할 수 있으므로 축약만으로 오류라고 하지 말라. 11.000원은 11,000원을 뜻할 수 있으므로 소수점이라고 단정하지 말라. "
+        "매월(매주 또는 매일)은 양식의 선택 안내일 수 있다. 대안이 병기됐다는 이유만으로 모순이라고 하지 말고 선택 흔적과 실제 주기를 확인하라. "
+        "체크 없음(0), 없음(V), 없음(o)는 선택 흔적일 수 있다. 체크인지 숫자인지 불명확하면 원본 확인을 요청하고 금액 공란만으로 상여금 있음이라고 해석하지 말라. "
+        "근로자 입장은 받을 금액·권리·근무 부담·요청할 자료 중심, 고용주 입장은 확정할 조건·지급 산정·일정 운영·제공 또는 보관할 자료 중심으로 설명과 질문을 작성하라. "
+        "근로자에게는 언제 받는지·어떤 기준이 적용되는지 질문하고, 고용주에게는 어떤 기준으로 산정·지급·관리할지 질문하라. "
         "시작일, 기간, 기본급, 시간, 지급일·지급방식의 단순 기재는 basic 및 확인 필요이다. "
         "유리는 구체적 추가 권리·혜택(benefit), 불리는 구체적 비용·권리 제한·책임(burden)에만 사용하라. "
         "관리 편의나 일반적인 의무 이행만으로 유리라고 판단하지 말라. "
@@ -1094,7 +1118,7 @@ def ai_feedback(pages, role, document_type, rules):
         "반드시 JSON 객체 하나만 출력하라: "
         '{"items":[{"topic_id":"항목 ID","evidence_id":"후보 ID",'
         '"impact":"확인 필요","assessment_kind":"basic|benefit|burden|uncertain",'
-        '"basis":"판단 근거 1문장","explanation":"쉬운 설명","question":"확인 질문"}]}\n'
+        '"basis":"판단 근거 1문장","check_reason":"기본 정보|기재 누락|OCR 확인|조건 확인","explanation":"쉬운 설명","question":"확인 질문"}]}\n'
         f"공통 검토 항목과 원문 후보: {json.dumps(active_topics, ensure_ascii=False)}\n"
         f"전체 OCR 문맥(후보의 의미 확인용):\n{source}"
     )
@@ -1239,6 +1263,8 @@ if result:
         with st.container(border=True):
             location = f"{item['page']}페이지" if item.get('page') else "원본 확인 필요"
             st.write(f"{item.get('title', '검토 항목')} / {item['impact']} / {location}")
+            if item.get("check_reason") and item["impact"] == "확인 필요":
+                st.caption(f"확인 구분: {item['check_reason']}")
             st.write(item['explanation'])
             if item.get("basis"):
                 st.write(f"판단 근거: {item['basis']}")
