@@ -883,7 +883,7 @@ def create_pdf_report(analysis_result):
         if item.get("basis"):
             paragraph(f"판단 근거: {item['basis']}")
         if item.get("quote"):
-            paragraph(f"원문: {item['quote']}")
+            paragraph(f"사진에서 읽은 내용: {item['quote']}")
         paragraph(f"확인 질문: {item['question']}")
     diagnostics = analysis_result.get("ai_diagnostics")
     if diagnostics:
@@ -1167,7 +1167,7 @@ def render_source_quote(quote):
     safe_quote = escape(str(quote))
     st.markdown(
         '<div style="font-size:1rem;font-weight:400;line-height:1.6;'
-        'white-space:pre-wrap;overflow-wrap:anywhere;">원문: '
+        'white-space:pre-wrap;overflow-wrap:anywhere;">사진에서 읽은 내용: '
         + safe_quote + '</div>', unsafe_allow_html=True
     )
 
@@ -1247,6 +1247,7 @@ if images:
         result["user_role"] = role
         result["selected_document_type"] = doc_choice
         result["ocr_page_texts"] = page_texts
+        result["source_images"] = list(images)
         result["ai_items"] = []
         result["ai_error"] = None
         result["ai_pending"] = True
@@ -1259,30 +1260,37 @@ result = st.session_state.get("analysis_result")
 if result:
     st.subheader("분석 결과")
     st.write(f"선택한 문서: {result['selected_document_type']} / 입장: {result['user_role']}")
-    if result.get("ai_error"):
-        st.info(result["ai_error"])
+    if result.get("ai_error") and not result.get("ai_items"):
+        st.info("AI 설명을 표시하지 못했습니다. 분석 과정에서 이유를 확인하고 다시 시도해 주세요.")
     ai_status = st.empty()
     if result.get("ai_pending"):
         ai_status.info("사진에서 글자를 읽었습니다. AI 설명을 만들고 있습니다.")
-    elif result.get("ai_error") and st.button("AI 분석 다시 시도"):
+    elif result.get("ai_error") and not result.get("ai_items") and st.button("AI 분석 다시 시도"):
         result["ai_pending"] = True
         result["ai_error"] = None
         st.rerun()
     if result.get("ai_items"):
         st.subheader("이 문서에서 확인할 내용")
-        st.caption("중요한 내용부터 보여드립니다. 각 항목을 펼치면 설명과 원문을 볼 수 있습니다.")
+        st.caption("중요한 내용부터 보여드립니다. 각 항목을 펼치면 설명과 사진에서 읽은 내용을 볼 수 있습니다.")
     for item in result.get("ai_items", []):
         with st.container(border=True):
             st.write(f"{item.get('title', '검토 항목')} · {item['impact']}")
             st.write(item.get("summary") or item["explanation"])
-            with st.expander("설명·확인 질문·원문 보기"):
+            with st.expander("설명·질문·사진 보기"):
                 st.write(item["explanation"])
                 st.write(f"확인할 질문: {item['question']}")
                 if item.get("basis"):
                     st.write(f"이렇게 설명한 이유: {item['basis']}")
                 st.caption(f"{item['page']}페이지")
                 render_source_quote(item["quote"])
+                source_images = result.get("source_images", [])
+                page_index = item["page"] - 1
+                if 0 <= page_index < len(source_images):
+                    st.image(source_images[page_index], caption=f"{item['page']}페이지 원본 사진", width=600)
+                st.caption("날짜·금액·체크 표시는 원본 사진과 비교해 주세요.")
     with st.expander("분석 과정 보기"):
+        if result.get("ai_error"):
+            st.write(result["ai_error"])
         st.write(f"OCR 판별: {result['document_type']} (키워드 일치율 {result['document_confidence']}%)")
         st.caption("키워드 일치율은 사진에서 글자를 얼마나 정확히 읽었는지를 뜻하지 않습니다.")
         if result['document_type'] != result['selected_document_type']:
@@ -1314,7 +1322,7 @@ if result:
         "분석 PDF 다운로드", create_pdf_report(result),
         file_name="bridge_analysis.pdf", mime="application/pdf"
     )
-    st.caption("자동 분석은 문서 이해를 돕는 자료입니다. OCR 원문과 계약서 전체를 대조해 주세요.")
+    st.caption("자동 분석은 문서 이해를 돕는 자료입니다. 날짜·금액·체크 표시는 원본 사진과 비교해 주세요.")
 
     # 먼저 화면에 OCR·규칙 결과를 표시한 뒤 AI를 호출한다.
     if result.get("ai_pending"):
