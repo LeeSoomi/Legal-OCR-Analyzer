@@ -964,7 +964,16 @@ def create_pdf_report(analysis_result):
     for item in analysis_result.get("ai_items", []):
         title = item["title"] if item["readable"] else "읽기 어려운 부분: " + item["title"]
         paragraph(title, "Heading2")
+        if item.get("attention"):
+            paragraph("주의해서 볼 내용")
         paragraph(item["explanation"])
+        if item.get("attention_reason"):
+            paragraph(f"주의할 이유: {item['attention_reason']}")
+        if item.get("action"):
+            paragraph(item["action"])
+        if item.get("detail"):
+            paragraph("자세한 내용", "Heading3")
+            paragraph(item["detail"])
         if item.get("question"):
             paragraph(f"확인할 질문: {item['question']}")
         paragraph(f"원본 위치: {item['page']}페이지 · {item['location']}")
@@ -1206,10 +1215,28 @@ def validate_simple_findings(data, pages):
         if not item["readable"] and not question.strip():
             rejected += 1
             continue
+        detail = item.get("detail", "")
+        action = item.get("action", "")
+        if not isinstance(detail, str) or not isinstance(action, str):
+            rejected += 1
+            continue
+        attention = item.get("attention", False)
+        attention_reason = item.get("attention_reason", "")
+        if type(attention) is not bool or not isinstance(attention_reason, str):
+            rejected += 1
+            continue
+        if not item["readable"]:
+            attention = False
+            attention_reason = ""
+        if attention and (not attention_reason.strip() or not (action.strip() or question.strip())):
+            rejected += 1
+            continue
         # 사진 판독 후보와 OCR 문자열 일치를 구분한다.
         ocr_quote = match_source_quote(quote, pages[page - 1]) if quote else None
         output.append({"title": item["title"][:100], "page": page,
-                       "explanation": item["explanation"][:1200],
+                       "explanation": item["explanation"],
+                       "detail": detail, "action": action,
+                       "attention": attention, "attention_reason": attention_reason,
                        "quote": ocr_quote or quote[:1200],
                        "location": item["location"][:200],
                        "question": question[:400], "readable": item["readable"],
@@ -1238,15 +1265,42 @@ def ai_feedback(pages, role, document_type, rules):
             "숫자·날짜·금액·선택 여부를 추측하지 말라. 불분명한 부분은 readable=false로 하고 "
             "explanation에는 어떤 내용을 읽기 어려운지만 설명하며 question에 확인 질문을 넣어라. "
             "빈칸과 읽기 실패를 혼동하지 말고 서명만으로 다른 사람이라고 판단하지 말라. "
+            "반드시 선택한 사용자에게 부담이 될 수 있는 실제 조건을 검토하라. "
+            "자동결제·유료 전환·자동갱신, 중도해지 위약금, 추가 비용, 환불 제한, "
+            "과도한 손해배상·책임 전가·상대방 면책, 일방적 변경, 권리·휴가 제한, 개인정보 제공 등을 "
+            "검토 단서로 사용하되 이 목록 밖의 중요한 부담도 놓치지 말라. "
+            "단어가 존재한다는 이유로 불리하다고 하지 말고, 누가 어떤 상황에서 부담하는지와 "
+            "예외·조건·다른 조항을 함께 확인하라. 상대방의 부담을 사용자 부담으로 뒤집지 말라. "
+            "명확히 읽힌 조건이 선택한 사용자에게 실제 비용·손실·제약을 만들거나 특별한 확인이 필요하면 attention=true로 하라. "
+            "일반적인 금액·날짜·표준 의무만으로 모두 주의 표시를 붙이지 말라. "
+            "사용자를 보호하는 조항이나 부담을 부정하는 표현은 주의 조건으로 오인하지 말라. "
+            "attention_reason에 원문에 근거한 구체적인 사용자 부담을 짧게 적고, explanation에도 그 부담을 쉽게 설명하라. "
+            "주의 항목에는 부담 발생 조건과 필요한 확인 행동 또는 질문을 포함하라. "
+            "읽기 어려워 부담을 판단할 수 없으면 readable=false, attention=false로 하고 원본 확인만 요청하라. "
+            "주의 조건을 찾지 못했더라도 안전하거나 불리한 조건이 없다고 단정하지 말라. "
+            "여러 조항을 함께 볼 필요가 있으면 detail에 관련 위치와 조건을 설명하라. "
             "결과는 중요한 계약 내용과 실제 확인할 부분만 제시하라. 이름·주소·전화번호의 단순 나열은 생략하라. "
             "관련된 내용은 묶어 대체로 5~8개로 간결하게 설명하되 중요한 비용·기간·해지·특약을 개수 때문에 생략하지 말라. "
+            "title은 사용자가 궁금해할 짧은 질문으로 작성하라. 예: 계약을 취소하면 계약금은 어떻게 되나요? "
+            "명사만 나열하거나 조항 번호를 제목으로 쓰지 말라. "
+            "explanation은 사용자 입장에서 알아야 할 뜻을 2~3개의 짧은 문장, 대체로 150자 이내로 작성하라. "
+            "중요한 조건을 빼거나 뜻을 바꾸며 줄이지 말라. 예외·세부 조건은 detail에 넣고, "
+            "주요 설명만 읽었을 때 잘못 이해할 필수 조건은 explanation에도 포함하라. "
+            "detail은 필요할 때만 작성하고 explanation을 반복하지 말라. "
+            "근저당권 말소는 집에 설정된 담보를 없애는 것처럼 용어의 뜻을 일상적인 말로 풀어 설명하라. "
+            "action에는 선택한 사용자 입장에서 실제로 확인할 일이 있을 때만 짧은 한 문장을 쓰라. "
+            "예: 잔금을 주기 전에 담보가 없어졌는지 확인할 서류를 요청하세요. "
+            "행동은 이 문서의 조건을 확인하기 위한 것으로 한정하고 새로운 의무·법적 권리를 만들어내지 말라. "
+            "모든 항목에 행동이나 질문을 억지로 붙이지 말고 필요 없으면 빈 문자열로 두라. "
+            "읽기 어려운 항목에서는 추정한 조건에 따른 행동을 안내하지 말고 원본 확인만 요청하라. "
+            "서명 판독 차이만으로 확인 항목을 추가하지 말고 반복되는 설명과 질문은 합쳐라. "
             "초등학교 고학년도 이해할 일상적인 말로 설명하며 불필요한 법률 용어나 유리·불리 점수는 쓰지 말라. "
             "문서 밖의 법률 기준을 추가하거나 계약의 효력을 단정하지 말라. "
             "quote에는 해당 페이지에서 실제로 읽은 원문을 그대로 넣고 location에는 사진 속 위치를 써라. "
             "확인 질문은 필요할 때만 쓰고, 명확한 내용에는 빈 문자열로 둬라. "
-            'JSON만 반환: {"items":[{"title":"월 납부금", "page":1, "readable":true, '
+            'JSON만 반환: {"items":[{"title":"매달 얼마를 내야 하나요?", "page":1, "readable":true, '
             '"quote":"실제로 읽은 원문", "location":"상단 금액 표", '
-            '"explanation":"매달 내야 하는 돈은 ...입니다.", "question":""}]}.'
+            '"explanation":"매달 내야 하는 돈은 ...입니다.", "detail":"", "action":"", "question":"", "attention":false, "attention_reason":""}]}.'
         )
         content = [{"type": "input_text", "text": prompt}]
         total_bytes = 0
@@ -1334,7 +1388,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v3", None)
+        st.session_state.pop("simple_analysis_result_v5", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1371,7 +1425,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v3", None)
+        st.session_state.pop("simple_analysis_result_v5", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1381,7 +1435,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v3", None)
+            st.session_state.pop("simple_analysis_result_v5", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1389,15 +1443,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v3 = result
+            st.session_state.simple_analysis_result_v5 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v3", None)
+    st.session_state.pop("simple_analysis_result_v5", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v3")
+result = st.session_state.get("simple_analysis_result_v5")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1411,14 +1465,27 @@ if result:
             result["ai_error"] = None
             st.rerun()
     items = result.get("ai_items", [])
-    readable = [item for item in items if item["readable"]]
+    readable = sorted([item for item in items if item["readable"]],
+                      key=lambda item: not item.get("attention", False))
     unclear = [item for item in items if not item["readable"]]
     for number, item in enumerate(readable, 1):
         with st.container(border=True):
             st.write(f"{number}. {item['title']}")
+            if item.get("attention"):
+                st.markdown("**주의해서 볼 내용**")
             st.write(item["explanation"])
-            if item["question"]:
+            if item.get("action"):
+                st.write(item["action"])
+            elif item["question"]:
                 st.write(f"확인할 질문: {item['question']}")
+            if item.get("detail") or item.get("attention_reason") or (item.get("action") and item["question"]):
+                with st.expander("자세히 보기"):
+                    if item.get("attention_reason"):
+                        st.write(f"주의할 이유: {item['attention_reason']}")
+                    if item.get("detail"):
+                        st.write(item["detail"])
+                    if item.get("action") and item["question"]:
+                        st.write(f"확인할 질문: {item['question']}")
             with st.expander("원본 보기"):
                 st.caption(f"{item['page']}페이지 · {item['location']}")
                 st.text(item["quote"])
@@ -1443,5 +1510,5 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
-        st.session_state.simple_analysis_result_v3 = result
+        st.session_state.simple_analysis_result_v5 = result
         st.rerun()
