@@ -1381,7 +1381,49 @@ def ai_feedback(pages, role, document_type, rules):
         raw = response.output_text.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        output, rejected = validate_simple_findings(json.loads(raw), pages)
+        draft = json.loads(raw)
+        if not isinstance(draft, dict) or not isinstance(draft.get("items"), list):
+            raise ValueError("draft items required")
+        # 초안을 사실로 취급하지 않고 같은 원본 사진·OCR을 다시 제공한다.
+        review_instruction = (
+            "지금은 계약 이해 설명의 최종 편집자다. 초안은 검증된 사실이 아니며 오류가 있을 수 있다. "
+            "원본 사진과 전체 OCR을 우선 근거로 삼아 아래 초안을 다시 검토하고 수정된 전체 items를 반환하라. "
+            "각 제목·쉬운 설명·자세한 내용·확인 행동을 모두 검토하라. "
+            "누가, 어떤 조건에서, 언제 무엇을 해야 하는지 원문과 대조하라. "
+            "지급 이전·당일까지·이후를 서로 바꾸지 말고 계약금·중도금·잔금을 구분하라. "
+            "다른 항목의 예시에서도 같은 약속의 시점과 당사자를 바꾸지 말라. "
+            "원문에 없는 고의·과실·선행 위반·법률 요건·서류 명칭을 조건으로 추가했다면 삭제하라. "
+            "제목과 설명의 주제가 다른 경우 항목을 나누라. 보호받는 해지 권리와 "
+            "연체로 계약이 종료되는 부담처럼 서로 다른 효과는 한 항목에 합치지 말라. "
+            "사용자에게 부담이 되는 부분에만 attention=true를 허용하고, 보호 약속과 통상 비용은 경고하지 말라. "
+            "손글씨 특약과 원문의 필수 예외·동시 이행 조건이 빠졌다면 복원하라. "
+            "전체 문서를 모두 올렸다고 가정하지 말고 제공된 페이지 범위에서만 설명하라. "
+            "초안의 해석이 아니라 실제 원문을 quote로 보존하라. 읽기 불명확한 부분은 readable=false로 하라. "
+            "쉬운 제목과 2~3문장 설명을 유지하며 어려운 용어를 풀어라. "
+            "원문에 근거가 있는 내용을 쉽게 설명하는 것이 목적이다. 불필요한 조언·추측·법률 판정을 삭제하라. "
+            "초안 개수에 맞출 필요는 없으며 중요한 내용을 누락하지 말라. "
+            "반환 JSON은 앞서 지정한 모든 필드를 포함하는 items 전체다. 수정 내역이나 평가를 출력하지 말라.\n"
+            + "검토할 초안:\n" + json.dumps(draft, ensure_ascii=False)
+        )
+        review_content = [
+            {"type": "input_text", "text": prompt + "\n" + review_instruction}
+        ] + content[1:]
+        if total_bytes + len(review_content[0]["text"].encode("utf-8")) > 45 * 1024 * 1024:
+            return [], "검토할 사진 용량이 큽니다. 문서를 나누어 올려 주세요."
+        rules["review_completed"] = False
+        try:
+            review = OpenAI(api_key=key, timeout=120.0, max_retries=0).responses.create(
+                model=model, store=False, input=[{"role": "user", "content": review_content}])
+            reviewed_raw = review.output_text.strip()
+            if reviewed_raw.startswith("```"):
+                reviewed_raw = reviewed_raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            output, rejected = validate_simple_findings(json.loads(reviewed_raw), pages)
+            if not output:
+                return [], "원본과 대조할 설명을 확정하지 못했습니다. 사진을 확인하고 다시 분석해 주세요."
+            rules["review_completed"] = True
+        except Exception as exc:
+            rules["technical_error"] = "review:" + type(exc).__name__
+            return [], "설명의 원본 대조를 완료하지 못했습니다. 다시 분석해 주세요."
         rules["simple_rejected"] = rejected
         if not output:
             return [], "설명할 내용을 읽지 못했습니다. 글자가 선명한 사진으로 다시 올려 주세요."
@@ -1452,7 +1494,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v7", None)
+        st.session_state.pop("simple_analysis_result_v8", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1489,7 +1531,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v7", None)
+        st.session_state.pop("simple_analysis_result_v8", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1499,7 +1541,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v7", None)
+            st.session_state.pop("simple_analysis_result_v8", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1507,20 +1549,20 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v7 = result
+            st.session_state.simple_analysis_result_v8 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v7", None)
+    st.session_state.pop("simple_analysis_result_v8", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v7")
+result = st.session_state.get("simple_analysis_result_v8")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
     if result.get("ai_pending"):
-        ai_status.info("사진을 읽고 쉬운 설명을 만들고 있습니다.")
+        ai_status.info("사진을 읽고 설명을 원본과 대조하고 있습니다.")
     else:
         if result.get("ai_error"):
             st.info(result["ai_error"])
@@ -1574,5 +1616,5 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
-        st.session_state.simple_analysis_result_v7 = result
+        st.session_state.simple_analysis_result_v8 = result
         st.rerun()
