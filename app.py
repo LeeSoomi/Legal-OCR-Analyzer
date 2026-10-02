@@ -3,6 +3,8 @@ import hashlib
 import time
 import re
 import json
+import math
+import statistics
 from typing import List, Dict, Any
 from xml.sax.saxutils import escape
 from reportlab.pdfbase import pdfmetrics
@@ -90,23 +92,94 @@ def normalize_text(text: str) -> str:
 # OCR
 # ---------------------------------------------------------
 
+def _word_text(word):
+    return "".join(symbol.text for symbol in word.symbols)
+
+
+def _vertices(box):
+    # Vision은 0인 좌표를 생략하므로 기본값 0으로 읽는다.
+    return [(getattr(v, "x", 0) or 0, getattr(v, "y", 0) or 0) for v in box.vertices]
+
+
+def build_layout_text(annotation) -> str:
+    """단어 좌표로 줄과 칸을 복원한다. 표의 칸은 ' | '로 구분한다."""
+    words = []
+    for page in annotation.pages:
+        for block in page.blocks:
+            for paragraph in block.paragraphs:
+                for word in paragraph.words:
+                    text = _word_text(word)
+                    pts = _vertices(word.bounding_box)
+                    if text and len(pts) == 4:
+                        words.append((text, pts))
+    if not words:
+        return ""
+
+    # 1) 사진이 기울어진 각도를 단어 윗변 방향의 중앙값으로 추정한다.
+    angles = []
+    for _, pts in words:
+        dx, dy = pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
+        if dx * dx + dy * dy > 0:
+            angles.append(math.atan2(dy, dx))
+    angle = statistics.median(angles) if angles else 0.0
+    cos_a, sin_a = math.cos(-angle), math.sin(-angle)
+
+    # 2) 좌표를 반대로 회전해 글줄을 수평으로 맞춘다.
+    items = []
+    for text, pts in words:
+        rotated = [(x * cos_a - y * sin_a, x * sin_a + y * cos_a) for x, y in pts]
+        xs, ys = [p[0] for p in rotated], [p[1] for p in rotated]
+        items.append({"text": text, "x0": min(xs), "x1": max(xs),
+                      "y0": min(ys), "y1": max(ys), "cy": (min(ys) + max(ys)) / 2})
+    height = statistics.median(i["y1"] - i["y0"] for i in items) or 1.0
+
+    # 3) 세로 중심이 가까운 단어끼리 한 줄(표에서는 한 행)로 묶는다.
+    items.sort(key=lambda i: i["cy"])
+    lines = []
+    for item in items:
+        if lines and abs(item["cy"] - lines[-1]["cy"]) < height * 0.6:
+            line = lines[-1]
+            line["words"].append(item)
+            line["cy"] = sum(w["cy"] for w in line["words"]) / len(line["words"])
+        else:
+            lines.append({"cy": item["cy"], "words": [item]})
+
+    # 4) 줄 안에서 왼쪽부터 이어 붙이고, 간격이 넓으면 칸 경계로 본다.
+    output, previous_cy = [], None
+    for line in lines:
+        line_words = sorted(line["words"], key=lambda w: w["x0"])
+        parts = [line_words[0]["text"]]
+        for left, right in zip(line_words, line_words[1:]):
+            gap = right["x0"] - left["x1"]
+            if gap > height * 1.5:
+                parts.append(" | ")
+            elif gap > height * 0.25:
+                parts.append(" ")
+            parts.append(right["text"])
+        if previous_cy is not None and line["cy"] - previous_cy > height * 2.5:
+            output.append("")  # 문단·표 사이의 큰 세로 간격
+        output.append("".join(parts))
+        previous_cy = line["cy"]
+    return "\n".join(output)
+
+
 def extract_text_from_image(image_bytes: bytes) -> str:
     client = get_vision_client()
-
-    image = vision.Image(
-        content=image_bytes
-    )
-
+    image = vision.Image(content=image_bytes)
     response = client.document_text_detection(
-        image=image
+        image=image,
+        image_context=vision.ImageContext(language_hints=["ko", "en"]),
     )
-
     if response.error.message:
-        raise RuntimeError(
-            f"Google Cloud Vision OCR 오류: {response.error.message}"
-        )
+        raise RuntimeError(f"Google Cloud Vision OCR 오류: {response.error.message}")
 
-    return response.full_text_annotation.text or ""
+    annotation = response.full_text_annotation
+    # 좌표 기반 복원이 실패하면 기존 방식(읽기 순서 텍스트)으로 돌아간다.
+    try:
+        layout_text = build_layout_text(annotation)
+    except Exception:
+        layout_text = ""
+    return layout_text or annotation.text or ""
 
 
 # ---------------------------------------------------------
@@ -1037,10 +1110,11 @@ def build_review_topics(pages, document_type):
 
 def match_source_quote(quote, page_text):
     """공백 차이만 허용하고 인용은 실제 OCR 문자열로 복원한다."""
-    compact_quote = re.sub(r"\s+", "", quote)
+    compact_quote = re.sub(r"[\s|]+", "", quote)
     if len(compact_quote) < 6:
         return None
-    positions = [i for i, character in enumerate(page_text) if not character.isspace()]
+    positions = [i for i, character in enumerate(page_text)
+                 if not character.isspace() and character != "|"]
     compact_page = "".join(page_text[i] for i in positions)
     start = compact_page.find(compact_quote)
     if start < 0:
@@ -1154,7 +1228,7 @@ def ai_feedback(pages, role, document_type, rules):
         "명확한 기본 조건은 정보로 표시한다. OCR 오류·선택 불명확·중요 조건 미확정은 확인 필요로 표시한다. "
         "문서에 조건이 없다고 단정하려면 전체를 확인해야 한다. 공란처럼 보이는 OCR만으로 원본 공란을 확정하지 말라. "
         "26년·11.000원과 같은 표기는 문맥상 축약·천 단위 구분일 수 있다. 양식 대안의 병기만으로 모순이라고 하지 말라. "
-        "양식 안내와 실제 기재를 구분하고 18세 미만 안내만으로 실제 연령을 확정하지 말라. 표의 행·열 연결이나 체크 표시가 불명확하면 추정 대신 원본 확인을 요청하라. "
+        "양식 안내와 실제 기재를 구분하고 18세 미만 안내만으로 실제 연령을 확정하지 말라. 표의 행·열 연결이나 체크 표시가 불명확하면 추정 대신 원본 확인을 요청하라. OCR 텍스트는 글자 위치로 줄을 복원한 것으로, 한 줄은 표의 한 행이고 ' | '는 표의 칸 경계다. 첫 행이 항목명이면 아래 행의 같은 순서 칸과 연결해 읽어라. "
         "법적 효력·위법 여부 또는 문서 밖의 법정 수치·권리를 단정하지 말라. 문서에 인용된 법령 문구를 설명할 때도 적용 요건을 확정하지 말라. "
         "근로자 등 권리를 받는 입장은 받을 내용·부담·확인할 자료, 고용주 등 제공하는 입장은 지급·산정·운영·제공할 자료 중심으로 작성하라. "
         "제목은 쉬운 말로 짧게 작성하고 summary는 사용자에게 미치는 영향을 한 문장으로 요약하라. 초등학교 고학년도 이해할 수 있는 일상적인 말을 사용하라. 갱신은 계약을 계속 이어감, 산정은 금액 계산처럼 풀어 쓰고 꼭 필요한 전문 용어는 뜻을 함께 설명하라. 원문 quote는 바꾸지 말라. explanation은 무슨 내용인지와 사용자에게 어떤 영향이 있는지 2문장 이내로 설명하고, 판단 근거는 1문장, question은 사용자가 무엇을 확인하거나 요청할지 구체적인 질문 1개로 작성하라. 문서 전체에서 중요한 부담과 서명 전 확인할 조건부터 먼저 배열하되 유불리 표시만으로 중요도를 정하지 말라. "
