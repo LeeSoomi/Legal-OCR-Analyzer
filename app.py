@@ -1322,8 +1322,58 @@ def validate_clause_coverage(data, clauses):
         raise ValueError("important clause missing")
 
 
+def ai_response_format(kind):
+    """API에 필수 필드와 자료형을 명시한다."""
+    if kind == "clauses":
+        strings = "id section location quote actor effect condition timing exception question".split()
+        flags = ["readable", "important"]
+    else:
+        strings = "title quote location explanation detail action question attention_reason burden_condition".split()
+        flags = ["readable", "attention"]
+    properties = {k: {"type": "string"} for k in strings}
+    properties.update({k: {"type": "boolean"} for k in flags})
+    properties["page"] = {"type": "integer"}
+    if kind == "items":
+        properties["clause_ids"] = {"type": "array", "items": {"type": "string"}}
+        properties["role_effect"] = {"type": "string", "enum": ["burden", "protection", "basic", "uncertain"]}
+        properties["risk_basis"] = {"type": "string", "enum": ["extra_cost", "conditional_loss", "rights_limit", "one_sided", "none"]}
+    entry = {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+    schema = {"type": "object", "properties": {kind: {"type": "array", "items": entry}},
+              "required": [kind], "additionalProperties": False}
+    return {"format": {"type": "json_schema", "name": "document_" + kind, "strict": True, "schema": schema}}
+
+
+def read_ai_json(response):
+    if getattr(response, "status", None) == "incomplete":
+        raise ValueError("incomplete response")
+    raw = response.output_text.strip()
+    if not raw:
+        raise ValueError("empty response")
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(raw)
+
+
+def ai_failure_message(exc, stage):
+    name = type(exc).__name__
+    if "Timeout" in name:
+        return "AI 응답 시간이 초과됐습니다. 다시 분석하거나 사진을 나누어 올려 주세요."
+    if "Authentication" in name or "Permission" in name:
+        return "AI 연결 인증을 확인하지 못했습니다. API 키와 사용 권한을 확인해 주세요."
+    if "RateLimit" in name:
+        return "AI 사용 한도 또는 요청 제한에 도달했습니다. 사용 한도와 결제 설정을 확인해 주세요."
+    if "Connection" in name:
+        return "AI 서버에 연결하지 못했습니다. 잠시 후 다시 분석해 주세요."
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return f"{stage} 결과의 형식이나 조항 연결을 확인하지 못했습니다. 다시 분석해 주세요."
+    if "BadRequest" in name:
+        return "AI 요청 설정을 확인하지 못했습니다. 선택한 모델의 사진 입력·응답 형식 지원을 확인해 주세요."
+    return f"{stage} 중 오류가 발생했습니다. 다시 분석해 주세요."
+
+
 def ai_feedback(pages, role, document_type, rules):
     """첫 호출에서 조항을 기록하고 두 번째 호출에서 설명과 원본 대조를 수행한다."""
+    stage = "원문 조항 읽기"
     try:
         key = st.secrets.get("OPENAI_API_KEY")
         model = st.secrets.get("OPENAI_VISION_MODEL", st.secrets.get("OPENAI_MODEL", "gpt-5-mini"))
@@ -1454,11 +1504,9 @@ def ai_feedback(pages, role, document_type, rules):
         if total_bytes > 45 * 1024 * 1024:
             return [], "사진 용량이 큽니다. 문서를 나누어 올려 주세요."
         response = OpenAI(api_key=key, timeout=120.0, max_retries=0).responses.create(
-            model=model, store=False, input=[{"role": "user", "content": content}])
-        raw = response.output_text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        clauses = validate_clause_records(json.loads(raw), pages)
+            model=model, store=False, text=ai_response_format("clauses"),
+            input=[{"role": "user", "content": content}])
+        clauses = validate_clause_records(read_ai_json(response), pages)
         rules["clause_records"] = clauses
         # 조항 기록도 AI 판독 결과이므로 원본 사진을 다시 제공해 대조한다.
         review_instruction = (
@@ -1482,13 +1530,12 @@ def ai_feedback(pages, role, document_type, rules):
         if total_bytes + len(review_content[0]["text"].encode("utf-8")) > 45 * 1024 * 1024:
             return [], "검토할 사진 용량이 큽니다. 문서를 나누어 올려 주세요."
         rules["review_completed"] = False
+        stage = "쉬운 설명 검토"
         try:
             review = OpenAI(api_key=key, timeout=120.0, max_retries=0).responses.create(
-                model=model, store=False, input=[{"role": "user", "content": review_content}])
-            reviewed_raw = review.output_text.strip()
-            if reviewed_raw.startswith("```"):
-                reviewed_raw = reviewed_raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            reviewed_data = json.loads(reviewed_raw)
+                model=model, store=False, text=ai_response_format("items"),
+                input=[{"role": "user", "content": review_content}])
+            reviewed_data = read_ai_json(review)
             validate_clause_coverage(reviewed_data, clauses)
             output, rejected = validate_simple_findings(reviewed_data, pages)
             if rejected:
@@ -1498,14 +1545,14 @@ def ai_feedback(pages, role, document_type, rules):
             rules["review_completed"] = True
         except Exception as exc:
             rules["technical_error"] = "review:" + type(exc).__name__
-            return [], "설명의 원본 대조를 완료하지 못했습니다. 다시 분석해 주세요."
+            return [], ai_failure_message(exc, stage)
         rules["simple_rejected"] = rejected
         if not output:
             return [], "설명할 내용을 읽지 못했습니다. 글자가 선명한 사진으로 다시 올려 주세요."
         return output, "일부 설명을 표시하지 못했습니다. 원본을 확인하거나 다시 분석해 주세요." if rejected else None
     except Exception as exc:
         rules["technical_error"] = type(exc).__name__
-        return [], "AI가 사진을 분석하지 못했습니다. 연결 설정이나 사진을 확인하고 다시 시도해 주세요."
+        return [], ai_failure_message(exc, stage)
 
 
 def image_data_url(image_bytes):
@@ -1569,7 +1616,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v10", None)
+        st.session_state.pop("simple_analysis_result_v11", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1606,7 +1653,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v10", None)
+        st.session_state.pop("simple_analysis_result_v11", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1616,7 +1663,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v10", None)
+            st.session_state.pop("simple_analysis_result_v11", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1624,15 +1671,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v10 = result
+            st.session_state.simple_analysis_result_v11 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v10", None)
+    st.session_state.pop("simple_analysis_result_v11", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v10")
+result = st.session_state.get("simple_analysis_result_v11")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1693,5 +1740,5 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
-        st.session_state.simple_analysis_result_v10 = result
+        st.session_state.simple_analysis_result_v11 = result
         st.rerun()
