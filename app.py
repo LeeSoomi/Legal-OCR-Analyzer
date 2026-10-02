@@ -1225,9 +1225,21 @@ def validate_simple_findings(data, pages):
         if type(attention) is not bool or not isinstance(attention_reason, str):
             rejected += 1
             continue
-        if not item["readable"]:
+        role_effect = item.get("role_effect", "uncertain")
+        if role_effect not in {"burden", "protection", "basic", "uncertain"}:
+            rejected += 1
+            continue
+        burden_condition = item.get("burden_condition", "")
+        if not isinstance(burden_condition, str):
+            rejected += 1
+            continue
+        # 원본 확인 행동이 필요하다는 사실만으로 부담 표시를 붙이지 않는다.
+        if not item["readable"] or role_effect != "burden":
             attention = False
             attention_reason = ""
+        if attention and not burden_condition.strip():
+            rejected += 1
+            continue
         if attention and (not attention_reason.strip() or not (action.strip() or question.strip())):
             rejected += 1
             continue
@@ -1237,6 +1249,7 @@ def validate_simple_findings(data, pages):
                        "explanation": item["explanation"],
                        "detail": detail, "action": action,
                        "attention": attention, "attention_reason": attention_reason,
+                       "role_effect": role_effect, "burden_condition": burden_condition,
                        "quote": ocr_quote or quote[:1200],
                        "location": item["location"][:200],
                        "question": question[:400], "readable": item["readable"],
@@ -1271,7 +1284,16 @@ def ai_feedback(pages, role, document_type, rules):
             "검토 단서로 사용하되 이 목록 밖의 중요한 부담도 놓치지 말라. "
             "단어가 존재한다는 이유로 불리하다고 하지 말고, 누가 어떤 상황에서 부담하는지와 "
             "예외·조건·다른 조항을 함께 확인하라. 상대방의 부담을 사용자 부담으로 뒤집지 말라. "
-            "명확히 읽힌 조건이 선택한 사용자에게 실제 비용·손실·제약을 만들거나 특별한 확인이 필요하면 attention=true로 하라. "
+            "각 조항에서 누가 의무를 지는지, 누가 보호받는지, 의무·권리가 적용되는 조건과 예외가 무엇인지 먼저 판단하라. "
+            "그 후 선택한 사용자 입장에서 role_effect를 burden(구체적 손실·비용·권리 제한), "
+            "protection(사용자를 보호하는 권리·상대방의 약속), basic(일반적인 계약 조건), "
+            "uncertain(판단 근거 부족) 중 하나로 작성하라. "
+            "실제 부담이 직접 명시된 role_effect=burden 항목에만 attention=true를 허용하라. "
+            "burden_condition에는 누가 어떤 상황에서 무엇을 부담하는지 원문에 근거해 적어라. "
+            "특별한 확인이 필요하거나 약속 불이행을 걱정할 수 있다는 이유만으로 attention=true로 하지 말라. "
+            "사용자를 보호하는 상대방의 약속은 protection, attention=false로 하고 필요한 확인 행동만 action에 적어라. "
+            "동일 조항도 사용자 입장이 다르면 설명과 행동이 달라야 한다. "
+            "상대방의 의무가 사용자에게 유리하다는 것과 사용자가 그 의무를 부담한다는 것을 구분하라. "
             "일반적인 금액·날짜·표준 의무만으로 모두 주의 표시를 붙이지 말라. "
             "사용자를 보호하는 조항이나 부담을 부정하는 표현은 주의 조건으로 오인하지 말라. "
             "attention_reason에 원문에 근거한 구체적인 사용자 부담을 짧게 적고, explanation에도 그 부담을 쉽게 설명하라. "
@@ -1281,6 +1303,7 @@ def ai_feedback(pages, role, document_type, rules):
             "여러 조항을 함께 볼 필요가 있으면 detail에 관련 위치와 조건을 설명하라. "
             "결과는 중요한 계약 내용과 실제 확인할 부분만 제시하라. 이름·주소·전화번호의 단순 나열은 생략하라. "
             "관련된 내용은 묶어 대체로 5~8개로 간결하게 설명하되 중요한 비용·기간·해지·특약을 개수 때문에 생략하지 말라. "
+            "손글씨 특약의 각 약속은 보호 내용이어도 빠짐없이 설명에 포함하라. 서로 다른 약속을 합칠 때 내용을 누락하지 말라. "
             "title은 사용자가 궁금해할 짧은 질문으로 작성하라. 예: 계약을 취소하면 계약금은 어떻게 되나요? "
             "명사만 나열하거나 조항 번호를 제목으로 쓰지 말라. "
             "explanation은 사용자 입장에서 알아야 할 뜻을 2~3개의 짧은 문장, 대체로 150자 이내로 작성하라. "
@@ -1296,11 +1319,19 @@ def ai_feedback(pages, role, document_type, rules):
             "서명 판독 차이만으로 확인 항목을 추가하지 말고 반복되는 설명과 질문은 합쳐라. "
             "초등학교 고학년도 이해할 일상적인 말로 설명하며 불필요한 법률 용어나 유리·불리 점수는 쓰지 말라. "
             "문서 밖의 법률 기준을 추가하거나 계약의 효력을 단정하지 말라. "
+            "출력 전에 각 제목·explanation·detail·action을 원문 quote와 대조해 스스로 수정하라. "
+            "당사자, 금액·날짜, 사건의 시점, 이전·이후, 있음·없음, 부정, 조건과 예외를 그대로 보존하라. "
+            "계약금·중도금·잔금 같은 서로 다른 항목을 바꿔 쓰지 말라. "
+            "예를 들어 원문이 중도금(없으면 잔금) 지급 전이라고 하면 계약금 지급 전으로 바꾸지 말라. "
+            "차임이 있는 경우처럼 적용 범위를 한정하는 조건은 짧은 설명에도 유지하라. "
+            "계약 해지 가능이라는 원문을 즉시 퇴거 의무처럼 강한 의미로 확대하지 말라. "
+            "쉬운 설명과 자세한 설명이 서로 모순되면 반환 전에 수정하라. "
+            "주요 조건이 읽히지 않아 의미를 보존할 수 없으면 확정 설명 대신 readable=false로 하라. "
             "quote에는 해당 페이지에서 실제로 읽은 원문을 그대로 넣고 location에는 사진 속 위치를 써라. "
             "확인 질문은 필요할 때만 쓰고, 명확한 내용에는 빈 문자열로 둬라. "
             'JSON만 반환: {"items":[{"title":"매달 얼마를 내야 하나요?", "page":1, "readable":true, '
             '"quote":"실제로 읽은 원문", "location":"상단 금액 표", '
-            '"explanation":"매달 내야 하는 돈은 ...입니다.", "detail":"", "action":"", "question":"", "attention":false, "attention_reason":""}]}.'
+            '"explanation":"매달 내야 하는 돈은 ...입니다.", "detail":"", "action":"", "question":"", "attention":false, "attention_reason":"", "role_effect":"basic", "burden_condition":""}]}.'
         )
         content = [{"type": "input_text", "text": prompt}]
         total_bytes = 0
@@ -1388,7 +1419,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v5", None)
+        st.session_state.pop("simple_analysis_result_v6", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1425,7 +1456,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v5", None)
+        st.session_state.pop("simple_analysis_result_v6", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1435,7 +1466,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v5", None)
+            st.session_state.pop("simple_analysis_result_v6", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1443,15 +1474,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v5 = result
+            st.session_state.simple_analysis_result_v6 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v5", None)
+    st.session_state.pop("simple_analysis_result_v6", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v5")
+result = st.session_state.get("simple_analysis_result_v6")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1510,5 +1541,5 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
-        st.session_state.simple_analysis_result_v5 = result
+        st.session_state.simple_analysis_result_v6 = result
         st.rerun()
