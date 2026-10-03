@@ -1322,6 +1322,20 @@ def validate_clause_coverage(data, clauses):
         raise ValueError("중요 조항의 설명이 빠졌습니다: " + names)
 
 
+def validate_plain_language(data):
+    """원문 인용을 제외한 사용자 설명의 어려운 표현을 찾아 보완을 요청한다."""
+    terms = ("채무불이행", "이행 최고", "배액", "상환", "멸실", "차임", "교부", "귀속", "사용수익", "동시이행")
+    issues = []
+    for item in data.get("items", []):
+        text = " ".join(item.get(k, "") for k in
+                        ("title", "explanation", "detail", "action", "question", "attention_reason"))
+        found = [term for term in terms if term in text]
+        if found:
+            issues.append(item.get("title", "항목") + ": " + ", ".join(found))
+    if issues:
+        raise ValueError("어려운 표현을 일상적인 말로 풀어야 합니다: " + "; ".join(issues[:5]))
+
+
 def ai_response_format(kind):
     """API에 필수 필드와 자료형을 명시한다."""
     if kind == "clauses":
@@ -1485,6 +1499,9 @@ def ai_feedback(pages, role, document_type, rules):
             "서명·주소의 단순 정보는 important=false, 권리·의무·금액·기간·조건·예외와 참고사항은 important=true다. "
             "quote는 실제 읽힌 원문으로, actor는 당사자, effect는 원문상 권리·의무·효과를 기록하라. "
             "condition·timing·exception은 원문 표현을 보존하라. 없는 조건은 빈 문자열, 추측·법률 상식은 금지다. "
+            "문장 끝의 권리나 행동에 앞부분의 효과가 연결되면 그 행동을 condition에도 기록하라. "
+            "예: 돈을 돌려주고 계약을 해제할 수 있다는 문장은 계약을 해제하는 경우의 돈 처리이지 무조건 지급 의무가 아니다. "
+            "확인한 뒤 행동·먼저 처리한 뒤 신청 등 사건 순서도 timing에 빠짐없이 기록하라. "
             "날짜·빈칸·체크란·비친 글자를 구분하고 읽지 못하면 readable=false와 question을 기록하라. "
             "기재 방식(손글씨·인쇄)을 확실히 구분할 수 없으면 위치에 이를 단정하지 말라. "
             "각 기록은 고유 id, page(1부터), section(조항명·표 항목), location, quote, actor, effect, "
@@ -1518,6 +1535,16 @@ def ai_feedback(pages, role, document_type, rules):
             "원문에 있지만 기록에서 누락된 중요한 내용은 새 항목으로 따로 만들지 말고 "
             "같은 페이지의 관련 기록 항목에 원문 인용과 함께 추가하라. "
             "원문의 적용 조건과 예외는 짧은 explanation에도 유지하라. detail에만 숨기지 말라. "
+            "각 기록의 actor·effect·condition·timing·exception을 함께 읽고 무엇을 하는 경우에 효과가 생기는지 설명하라. "
+            "조건부 선택권을 무조건 의무로 바꾸지 말고, 지급·반환 조건인 계약 취소 등의 사건도 반드시 써라. "
+            "확인한 뒤 행동해야 한다는 순서가 있으면 확인 단계와 행동을 explanation에 모두 써라. "
+            "하지 않겠다는 의사를 할 수 없는 상태로 바꾸지 말라. 해제와 해지는 원문 인용에서는 구분을 유지하고 "
+            "사용자 설명에서는 계약을 취소함 또는 끝냄처럼 뜻을 풀되 별도의 법적 효과를 추가하지 말라. "
+            "제목·설명·세부 내용·제안에서 채무불이행·배액·상환·멸실·차임·교부·귀속·사용수익·동시이행을 쓰지 말라. "
+            "약속을 지키지 않음·두 배를 돌려줌·집이 없어지거나 쓸 수 없게 됨·월세·서류를 줌처럼 풀어라. "
+            "통상적인 반환·복구·이미 정한 사용료 지급만 있으면 basic·none·attention=false다. "
+            "해지 손실·연체로 종료·추가 비용·일방적 제한처럼 특별한 결과를 원문에서 확인한 때만 주의 표시하라. "
+            "location은 한국어 위치만 쓰고, 이름·날짜를 확정할 수 없으면 추측하지 말라. "
             "쉬운 설명과 추가 확인 제안을 구분하며 제안에서 원문의 기한을 바꿔 새로운 의무를 만들지 말라. "
             "제목에서도 어려운 단어를 풀어라. 읽히는 특약을 불명확하다고 하지 말고 배경에 비친 인쇄 글자는 제외하라. "
             "문서 종류가 맞으면 이를 확인하는 별도 항목은 만들지 말라. "
@@ -1540,6 +1567,7 @@ def ai_feedback(pages, role, document_type, rules):
                 try:
                     reviewed_data = read_ai_json(review)
                     validate_clause_coverage(reviewed_data, clauses)
+                    validate_plain_language(reviewed_data)
                     output, rejected = validate_simple_findings(reviewed_data, pages)
                     if rejected:
                         raise ValueError(f"설명 {rejected}개의 필수 내용이나 주의 표시 조건이 맞지 않습니다.")
@@ -1633,7 +1661,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v12", None)
+        st.session_state.pop("simple_analysis_result_v13", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1670,7 +1698,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v12", None)
+        st.session_state.pop("simple_analysis_result_v13", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1680,7 +1708,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v12", None)
+            st.session_state.pop("simple_analysis_result_v13", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1688,15 +1716,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v12 = result
+            st.session_state.simple_analysis_result_v13 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v12", None)
+    st.session_state.pop("simple_analysis_result_v13", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v12")
+result = st.session_state.get("simple_analysis_result_v13")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1757,5 +1785,5 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
-        st.session_state.simple_analysis_result_v12 = result
+        st.session_state.simple_analysis_result_v13 = result
         st.rerun()
