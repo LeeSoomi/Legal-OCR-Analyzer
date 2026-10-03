@@ -1509,15 +1509,25 @@ def compare_official_law(result):
         payload = response.model_dump()
         sources = set()
         searched = False
-        for output in payload.get("output", []):
+        for output in payload.get("output") or []:
+            if not isinstance(output, dict):
+                continue
             if output.get("type") == "web_search_call":
                 searched = True
-                for source in (output.get("action") or {}).get("sources", []):
+                action = output.get("action")
+                action = action if isinstance(action, dict) else {}
+                for source in action.get("sources") or []:
+                    if not isinstance(source, dict):
+                        continue
                     url = source.get("url", "")
                     if official_law_url(url):
                         sources.add(url)
-            for part in output.get("content", []):
-                for annotation in part.get("annotations", []):
+            for part in output.get("content") or []:
+                if not isinstance(part, dict):
+                    continue
+                for annotation in part.get("annotations") or []:
+                    if not isinstance(annotation, dict):
+                        continue
                     url = annotation.get("url", "")
                     if official_law_url(url):
                         sources.add(url)
@@ -1608,7 +1618,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v19", None)
+        st.session_state.pop("simple_analysis_result_v20", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1645,7 +1655,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v19", None)
+        st.session_state.pop("simple_analysis_result_v20", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1655,7 +1665,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v19", None)
+            st.session_state.pop("simple_analysis_result_v20", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1663,15 +1673,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v19 = result
+            st.session_state.simple_analysis_result_v20 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v19", None)
+    st.session_state.pop("simple_analysis_result_v20", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v19")
+result = st.session_state.get("simple_analysis_result_v20")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1757,12 +1767,12 @@ if result:
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started,
                       law_pending=bool(ai_items), law_checks=[], law_error=None)
-        st.session_state.simple_analysis_result_v19 = result
+        st.session_state.simple_analysis_result_v20 = result
         st.rerun()
 
     if items and result.get("law_pending") and not result.get("ai_pending"):
         with st.spinner("공식 법령과 비교하고 있습니다"):
             checks, error = compare_official_law(result)
         result.update(law_checks=checks, law_error=error, law_pending=False)
-        st.session_state.simple_analysis_result_v19 = result
+        st.session_state.simple_analysis_result_v20 = result
         st.rerun()
