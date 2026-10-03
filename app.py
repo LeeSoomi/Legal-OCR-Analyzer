@@ -1280,24 +1280,24 @@ def validate_simple_findings(data, pages):
 def validate_clause_records(data, pages):
     """원문 구조의 형식을 확인한다. 의미 정확성의 인증은 아니다."""
     if not isinstance(data, dict) or not isinstance(data.get("clauses"), list) or not data["clauses"]:
-        raise ValueError("clauses required")
+        raise ValueError("조항 기록 목록이 없거나 비어 있습니다.")
     clauses, identifiers = [], set()
     fields = ("id", "section", "location", "quote", "actor", "effect", "condition", "timing", "exception", "question")
     for clause in data["clauses"]:
         if not isinstance(clause, dict) or any(not isinstance(clause.get(k), str) for k in fields):
-            raise ValueError("clause fields required")
+            raise ValueError("조항 기록의 필수 항목이 없거나 문자열 형식이 아닙니다.")
         if not clause["id"].strip() or clause["id"] in identifiers:
-            raise ValueError("unique clause id required")
+            raise ValueError("조항 번호가 비어 있거나 중복됐습니다.")
         if type(clause.get("page")) is not int or not 1 <= clause["page"] <= len(pages):
-            raise ValueError("invalid clause page")
+            raise ValueError("조항 페이지 번호가 사진 범위를 벗어났습니다.")
         if type(clause.get("readable")) is not bool or type(clause.get("important")) is not bool:
-            raise ValueError("invalid clause flags")
+            raise ValueError("조항의 판독 여부 또는 중요 여부 값이 맞지 않습니다.")
         if not clause["section"].strip() or not clause["location"].strip():
-            raise ValueError("clause location required")
+            raise ValueError("조항 이름이나 원본 위치가 비어 있습니다.")
         if clause["readable"] and (not clause["quote"].strip() or not clause["effect"].strip()):
-            raise ValueError("clause evidence required")
+            raise ValueError("읽을 수 있다고 표시한 조항의 원문 인용이나 효과가 비어 있습니다.")
         if not clause["readable"] and not clause["question"].strip():
-            raise ValueError("unreadable question required")
+            raise ValueError("읽기 어려운 조항의 확인 질문이 비어 있습니다.")
         identifiers.add(clause["id"])
         clauses.append(dict(clause))
     return clauses
@@ -1520,10 +1520,29 @@ def ai_feedback(pages, role, document_type, rules):
                             {"type": "input_image", "image_url": url, "detail": "high"}])
         if total_bytes > 45 * 1024 * 1024:
             return [], "사진 용량이 큽니다. 문서를 나누어 올려 주세요."
-        response = OpenAI(api_key=key, timeout=120.0, max_retries=0).responses.create(
-            model=model, store=False, text=ai_response_format("clauses"),
-            input=[{"role": "user", "content": content}])
-        clauses = validate_clause_records(read_ai_json(response), pages)
+        extraction_content = content
+        for extraction_attempt in range(2):
+            response = OpenAI(api_key=key, timeout=120.0, max_retries=0).responses.create(
+                model=model, store=False, text=ai_response_format("clauses"),
+                input=[{"role": "user", "content": extraction_content}])
+            extracted_data = None
+            try:
+                extracted_data = read_ai_json(response)
+                clauses = validate_clause_records(extracted_data, pages)
+                break
+            except ValueError as validation_error:
+                rules["extraction_issue"] = str(validation_error)
+                if extraction_attempt == 1:
+                    return [], "원문 조항 기록을 보완했지만 확인하지 못했습니다. " + str(validation_error)
+                correction = (
+                    "원문 조항 기록의 오류를 수정하고 clauses 전체를 반환하라. 오류: " + str(validation_error)
+                    + "\n원본 사진을 다시 확인하고 실제 읽히지 않는 내용을 만들지 말라."
+                    + "\n이전 기록:\n" + json.dumps(extracted_data, ensure_ascii=False)
+                )
+                extraction_content = [{"type": "input_text", "text": extraction_prompt + "\n" + correction}] + content[1:]
+                if total_bytes + len(extraction_content[0]["text"].encode("utf-8")) > 45 * 1024 * 1024:
+                    return [], "보완할 사진 용량이 큽니다. 문서를 나누어 올려 주세요."
+                rules["extraction_repair_attempted"] = True
         rules["clause_records"] = clauses
         # 조항 기록도 AI 판독 결과이므로 원본 사진을 다시 제공해 대조한다.
         review_instruction = (
@@ -1661,7 +1680,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v13", None)
+        st.session_state.pop("simple_analysis_result_v14", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1698,7 +1717,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v13", None)
+        st.session_state.pop("simple_analysis_result_v14", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1708,7 +1727,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v13", None)
+            st.session_state.pop("simple_analysis_result_v14", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1716,15 +1735,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v13 = result
+            st.session_state.simple_analysis_result_v14 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v13", None)
+    st.session_state.pop("simple_analysis_result_v14", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v13")
+result = st.session_state.get("simple_analysis_result_v14")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1785,5 +1804,5 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started)
-        st.session_state.simple_analysis_result_v13 = result
+        st.session_state.simple_analysis_result_v14 = result
         st.rerun()
