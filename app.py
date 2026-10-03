@@ -1411,8 +1411,72 @@ def official_law_url(url):
         return False
 
 
+
+def law_failure_message(exc, stage):
+    """개인정보나 API 키가 포함될 수 있는 원시 오류는 화면에 노출하지 않는다."""
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    error = error if isinstance(error, dict) else {}
+    code = error.get("code")
+    param = error.get("param")
+    diagnostic = f"오류 종류: {name}" if re.fullmatch(r"[A-Za-z0-9_]{1,80}", name) else "오류 종류: 알 수 없음"
+    if type(status) is int:
+        diagnostic += f" · HTTP {status}"
+    for label, value in (("코드", code), ("설정 항목", param)):
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,100}", value):
+            diagnostic += f" · {label}: {value}"
+    if "Timeout" in name:
+        message = "공식 법령 검색 응답 시간이 초과됐습니다. 법령 비교 다시 하기를 눌러 주세요."
+    elif "Authentication" in name or status == 401:
+        message = "법령 검색 API 인증에 실패했습니다. OPENAI_API_KEY 설정을 확인해 주세요."
+    elif "Permission" in name or status == 403:
+        message = "법령 검색 요청이 권한 문제로 거절됐습니다. 해당 프로젝트의 모델·도구 사용 권한을 확인해 주세요."
+    elif "RateLimit" in name or status == 429:
+        message = "법령 검색 요청이 사용 한도 또는 요청 제한에 걸렸습니다. API 결제·사용 한도를 확인해 주세요."
+    elif "Connection" in name:
+        message = "법령 검색 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    elif "BadRequest" in name or status == 400:
+        message = "법령 검색 요청 설정이 거절됐습니다. 아래 설정 항목과 OPENAI_LAW_MODEL의 검색 지원을 확인해 주세요."
+    elif "NotFound" in name or status == 404:
+        message = "법령 검색에 지정한 모델 또는 API 경로를 찾지 못했습니다. OPENAI_LAW_MODEL 설정을 확인해 주세요."
+    elif isinstance(exc, (json.JSONDecodeError, ValueError, KeyError)):
+        message = "검색 응답을 법령 비교 결과로 읽지 못했습니다. 법령 비교 다시 하기를 눌러 주세요."
+    elif isinstance(exc, (TypeError, AttributeError)):
+        message = "법령 검색 처리 중 라이브러리 또는 응답 형식 호환 문제가 발생했습니다. openai 패키지 버전과 아래 오류 종류를 확인해 주세요."
+    elif type(status) is int and status >= 500:
+        message = "법령 검색 API 서버에서 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+    else:
+        message = "법령 비교 처리 중 오류가 발생했습니다. 아래 오류 종류를 확인해 주세요."
+    return f"{message} 쉬운 설명은 유지됩니다.\n실패 단계: {stage} · {diagnostic}"
+
+
+def read_law_json(response):
+    """검색 답변 앞뒤의 안내나 인용 표식은 허용하되 단일 checks 객체만 읽는다."""
+    if getattr(response, "status", None) == "incomplete":
+        raise ValueError("incomplete law response")
+    raw = getattr(response, "output_text", "")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("empty law response")
+    decoder = json.JSONDecoder()
+    candidates = []
+    for match in re.finditer(r"\{", raw):
+        try:
+            value, end = decoder.raw_decode(raw[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("checks"), list):
+            candidates.append(value)
+    if len(candidates) != 1:
+        raise ValueError("ambiguous law response")
+    return candidates[0]
+
 def compare_official_law(result):
     """쉬운 설명과 별도로 공식 법령을 실제 검색한다. 실패 시 기본 결과를 보존한다."""
+    stage = "검색 요청 준비"
+    result.pop("law_technical_error", None)
+    result.pop("law_checked_date", None)
     try:
         key = st.secrets.get("OPENAI_API_KEY")
         if not key:
@@ -1436,10 +1500,12 @@ def compare_official_law(result):
             f"검색일: {checked}. 문서: {result['selected_document_type']}. 사용자: {result['user_role']}.\n"
             + json.dumps(clauses, ensure_ascii=False)
         )
+        stage = "공식 법령 검색 API 요청"
         response = OpenAI(api_key=key, timeout=120.0, max_retries=0).responses.create(
             model=st.secrets.get("OPENAI_LAW_MODEL", "gpt-5-mini"), store=False,
             tools=[{"type": "web_search", "filters": {"allowed_domains": ["law.go.kr"]}}],
             tool_choice="required", include=["web_search_call.action.sources"], input=prompt)
+        stage = "공식 검색 출처 확인"
         payload = response.model_dump()
         sources = set()
         searched = False
@@ -1457,9 +1523,11 @@ def compare_official_law(result):
                         sources.add(url)
         if not searched or not sources:
             return [], "공식 법령 검색 근거를 확인하지 못했습니다. 법령 비교를 완료하지 못했습니다."
-        data = read_ai_json(response)
+        stage = "검색 답변 형식 해석"
+        data = read_law_json(response)
         if not isinstance(data.get("checks"), list):
             raise ValueError("invalid law checks")
+        stage = "원문과 법령 근거 연결"
         checks = []
         rejected = 0
         for item in data["checks"][:5]:
@@ -1477,7 +1545,7 @@ def compare_official_law(result):
         return checks, "일부 법령 비교 항목의 원문 또는 출처를 확인하지 못해 제외했습니다." if rejected else None
     except Exception as exc:
         result["law_technical_error"] = type(exc).__name__
-        return [], "법령 비교를 완료하지 못했습니다. 쉬운 설명은 확인할 수 있습니다. 모델의 검색 지원·API 사용 권한을 확인해 주세요."
+        return [], law_failure_message(exc, stage)
 
 def image_data_url(image_bytes):
     """EXIF 방향을 적용하고 사진 입력을 JPEG로 통일한다."""
@@ -1540,7 +1608,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v18", None)
+        st.session_state.pop("simple_analysis_result_v19", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1577,7 +1645,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v18", None)
+        st.session_state.pop("simple_analysis_result_v19", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1587,7 +1655,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v18", None)
+            st.session_state.pop("simple_analysis_result_v19", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1595,15 +1663,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v18 = result
+            st.session_state.simple_analysis_result_v19 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v18", None)
+    st.session_state.pop("simple_analysis_result_v19", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v18")
+result = st.session_state.get("simple_analysis_result_v19")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1689,12 +1757,12 @@ if result:
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started,
                       law_pending=bool(ai_items), law_checks=[], law_error=None)
-        st.session_state.simple_analysis_result_v18 = result
+        st.session_state.simple_analysis_result_v19 = result
         st.rerun()
 
     if items and result.get("law_pending") and not result.get("ai_pending"):
         with st.spinner("공식 법령과 비교하고 있습니다"):
             checks, error = compare_official_law(result)
         result.update(law_checks=checks, law_error=error, law_pending=False)
-        st.session_state.simple_analysis_result_v18 = result
+        st.session_state.simple_analysis_result_v19 = result
         st.rerun()
