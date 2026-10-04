@@ -1010,7 +1010,9 @@ def create_pdf_report(analysis_result):
             paragraph(f"출처: {check['url']} · 검색일: {check['checked_date']}")
             if check["question"]:
                 paragraph(f"확인할 질문: {check['question']}")
-        if not analysis_result.get("law_checks") and not analysis_result.get("law_error"):
+        if analysis_result.get("law_skipped"):
+            paragraph("중대한 위험 의심 항목을 찾지 못해 공식 법령 검색을 생략했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
+        elif not analysis_result.get("law_checks") and not analysis_result.get("law_error"):
             paragraph("이번 분석에서 중요한 위험 의심 항목을 찾지 못했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
     if analysis_result.get("ai_error"):
         paragraph(analysis_result["ai_error"])
@@ -1369,6 +1371,7 @@ def ai_feedback(pages, role, document_type, rules):
             "내부에서 각 조항의 당사자·효과·조건·기한·예외를 정리하고 원문과 대조한 뒤 쉬운 설명만 반환하라. "
             "title은 원문의 시점과 조건을 바꾸지 않는 쉬운 질문이다. explanation은 일반인이 이해하는 일상어로 쓰며 법률 용어를 그대로 두거나 괄호만 붙이지 않는다. 문장 수보다 당사자·조건·예외의 보존을 우선한다. 원문에 있는 예외를 action이나 question으로 대신하지 않는다. detail은 보충 설명에만 쓴다. "
             "페이지의 조항·각 항·참고사항·실제 작성된 특약을 순서대로 모두 읽는다. 주의하지 않아도 설명할 내용은 제외하지 않는다. "
+            "반환 직전에 title·explanation·detail·action·question을 다시 읽고 어려운 말이 남으면 문맥에 맞게 풀어 쓴다. quote만 원문을 그대로 보존한다. detail은 explanation을 법률 용어로 반복하지 않으며 추가 설명이 없으면 빈 문자열이다. "
             "모든 중요한 조건·예외를 explanation에 포함하고 detail에만 숨기지 않는다. 빈칸 하나가 있어도 읽을 수 있는 나머지 조항은 설명한다. "
             "legal_review는 공식 법령과의 비교가 필요한 중대한 권리 제한·일방적 책임·큰 손실 또는 강행 기준 충돌이 의심될 때만 true다. "
             "legal_review_reason에는 사용자 입장에서 의심하는 구체적 조건과 손실을 적는다. 큰 부담인지 금액만으로 단정하지 않는다. "
@@ -1376,9 +1379,9 @@ def ai_feedback(pages, role, document_type, rules):
             "읽기 불명확한 금액·날짜는 question으로 확인하고 그 추측에 기초해 법령 비교하지 않는다. "
             "action은 선택한 사용자의 추가 확인 제안이며 원문 의무와 섞지 않는다. 불필요하면 빈 문자열이다. "
             "quote는 해당 페이지의 실제 원문, location은 사진 위치다. OCR 줄·세로줄은 실제 셀 경계가 아니다. "
-            "readable=false에는 불명확한 부분의 설명과 question을 쓴다. "
+            "읽히는 조항과 불명확한 숫자·빈칸은 별도 항목으로 나눈다. readable=false는 해당 부분만 불명확할 때 쓰며, 일부 빈칸 때문에 선명한 특약·본문 전체를 읽기 어려움으로 분류하지 않는다. "
             "role_effect는 burden·protection·basic·uncertain이다. risk_basis는 extra_cost·conditional_loss·rights_limit·one_sided·none이다. "
-            "실제 사용자 부담이 직접 명시된 burden이며 risk_basis가 none이 아닌 경우만 attention=true다. "
+            "attention은 실제 사용자에게 명시된 취소 손실·추가 부담·권리 제한·일방적 책임에만 붙인다. 약정된 기간의 실제 사용 요금은 extra_cost가 아니라 basic·none·attention=false다. 금액이 불명확하면 실제 손실 규모를 단정하지 않는다. "
             "attention=true이면 burden_condition·attention_reason과 확인 제안 또는 질문을 함께 쓴다. "
             "items 배열의 각 항목은 title,page,readable,quote,location,explanation,detail,action,question,"
             "attention,attention_reason,role_effect,burden_condition,risk_basis,legal_review,legal_review_reason를 포함한다. JSON만 반환하라."
@@ -1659,7 +1662,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v21", None)
+        st.session_state.pop("simple_analysis_result_v22", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1696,7 +1699,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v21", None)
+        st.session_state.pop("simple_analysis_result_v22", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1706,7 +1709,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v21", None)
+            st.session_state.pop("simple_analysis_result_v22", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1714,15 +1717,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v21 = result
+            st.session_state.simple_analysis_result_v22 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v21", None)
+    st.session_state.pop("simple_analysis_result_v22", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v21")
+result = st.session_state.get("simple_analysis_result_v22")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1813,12 +1816,12 @@ if result:
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started,
                       law_pending=bool(ai_items), law_checks=[], law_error=None, law_skipped=False, law_seconds=0)
-        st.session_state.simple_analysis_result_v21 = result
+        st.session_state.simple_analysis_result_v22 = result
         st.rerun()
 
     if items and result.get("law_pending") and not result.get("ai_pending"):
         with st.spinner("공식 법령과 비교하고 있습니다"):
             checks, error = compare_official_law(result)
         result.update(law_checks=checks, law_error=error, law_pending=False)
-        st.session_state.simple_analysis_result_v21 = result
+        st.session_state.simple_analysis_result_v22 = result
         st.rerun()
