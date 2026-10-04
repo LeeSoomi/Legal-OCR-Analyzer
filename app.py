@@ -996,7 +996,9 @@ def create_pdf_report(analysis_result):
         if item.get("question"):
             paragraph(f"확인할 질문: {item['question']}")
         paragraph(f"원본 위치: {item['page']}페이지 · {item['location']}")
-    if analysis_result.get("law_checked_date") or analysis_result.get("law_error"):
+    if analysis_result.get("missing_clauses"):
+        paragraph("설명에서 확인되지 않은 조항: " + ", ".join(analysis_result["missing_clauses"]))
+    if analysis_result.get("law_checked_date") or analysis_result.get("law_error") or analysis_result.get("law_skipped"):
         paragraph("공식 법령과 비교해 확인할 내용", "Heading2")
         if analysis_result.get("law_error"):
             paragraph(analysis_result["law_error"])
@@ -1009,7 +1011,7 @@ def create_pdf_report(analysis_result):
             if check["question"]:
                 paragraph(f"확인할 질문: {check['question']}")
         if not analysis_result.get("law_checks") and not analysis_result.get("law_error"):
-            paragraph("이번 검색에서 표시할 비교 항목을 찾지 못했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
+            paragraph("이번 분석에서 중요한 위험 의심 항목을 찾지 못했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
     if analysis_result.get("ai_error"):
         paragraph(analysis_result["ai_error"])
     paragraph("AI가 사진을 읽어 설명한 자료입니다. 금액·날짜·선택 표시는 원본과 비교해 주세요.")
@@ -1274,12 +1276,11 @@ def validate_simple_findings(data, pages):
         if not item["readable"] or role_effect != "burden" or risk_basis == "none":
             attention = False
             attention_reason = ""
-        if attention and not burden_condition.strip():
-            rejected += 1
-            continue
-        if attention and (not attention_reason.strip() or not (action.strip() or question.strip())):
-            rejected += 1
-            continue
+        # 주의 표시의 보조 정보가 부족해도 읽은 본문은 유지한다.
+        if attention and (not burden_condition.strip() or not attention_reason.strip()):
+            attention = False
+            attention_reason = ""
+
         # 사진 판독 후보와 OCR 문자열 일치를 구분한다.
         ocr_quote = match_source_quote(quote, pages[page - 1]) if quote else None
         output.append({"title": item["title"][:100], "page": page,
@@ -1290,14 +1291,16 @@ def validate_simple_findings(data, pages):
                        "quote": ocr_quote or quote[:1200],
                        "location": item["location"][:200],
                        "question": question[:400], "readable": item["readable"],
-                       "source": "ocr_matched" if ocr_quote else "photo_reading"})
+                       "source": "ocr_matched" if ocr_quote else "photo_reading",
+                       "legal_review": item.get("legal_review") is True,
+                       "legal_review_reason": item.get("legal_review_reason", "") if isinstance(item.get("legal_review_reason", ""), str) else ""})
     return output, rejected
 
 
 def ai_response_format(kind):
     """API에 필수 필드와 자료형을 명시한다."""
-    strings = "title quote location explanation detail action question attention_reason burden_condition".split()
-    flags = ["readable", "attention"]
+    strings = "title quote location explanation detail action question attention_reason burden_condition legal_review_reason".split()
+    flags = ["readable", "attention", "legal_review"]
     properties = {k: {"type": "string"} for k in strings}
     properties.update({k: {"type": "boolean"} for k in flags})
     properties["page"] = {"type": "integer"}
@@ -1365,6 +1368,12 @@ def ai_feedback(pages, role, document_type, rules):
             "참고 기준은 정답 계약이나 법률 판정 기준이 아니다. 선택한 종류가 원본과 다르면 실제 원문에 맞춰 설명하라. "
             "내부에서 각 조항의 당사자·효과·조건·기한·예외를 정리하고 원문과 대조한 뒤 쉬운 설명만 반환하라. "
             "title은 원문의 시점과 조건을 바꾸지 않는 쉬운 질문이다. explanation은 일반인이 이해하는 일상어로 쓰며 법률 용어를 그대로 두거나 괄호만 붙이지 않는다. 문장 수보다 당사자·조건·예외의 보존을 우선한다. 원문에 있는 예외를 action이나 question으로 대신하지 않는다. detail은 보충 설명에만 쓴다. "
+            "페이지의 조항·각 항·참고사항·실제 작성된 특약을 순서대로 모두 읽는다. 주의하지 않아도 설명할 내용은 제외하지 않는다. "
+            "모든 중요한 조건·예외를 explanation에 포함하고 detail에만 숨기지 않는다. 빈칸 하나가 있어도 읽을 수 있는 나머지 조항은 설명한다. "
+            "legal_review는 공식 법령과의 비교가 필요한 중대한 권리 제한·일방적 책임·큰 손실 또는 강행 기준 충돌이 의심될 때만 true다. "
+            "legal_review_reason에는 사용자 입장에서 의심하는 구체적 조건과 손실을 적는다. 큰 부담인지 금액만으로 단정하지 않는다. "
+            "일반적인 관리비 정산·집 반환·보호 약속·통상적인 계약금 취소 규정·법정 권리 설명은 그 사실만으로 법령 비교 대상이 아니다. "
+            "읽기 불명확한 금액·날짜는 question으로 확인하고 그 추측에 기초해 법령 비교하지 않는다. "
             "action은 선택한 사용자의 추가 확인 제안이며 원문 의무와 섞지 않는다. 불필요하면 빈 문자열이다. "
             "quote는 해당 페이지의 실제 원문, location은 사진 위치다. OCR 줄·세로줄은 실제 셀 경계가 아니다. "
             "readable=false에는 불명확한 부분의 설명과 question을 쓴다. "
@@ -1372,7 +1381,7 @@ def ai_feedback(pages, role, document_type, rules):
             "실제 사용자 부담이 직접 명시된 burden이며 risk_basis가 none이 아닌 경우만 attention=true다. "
             "attention=true이면 burden_condition·attention_reason과 확인 제안 또는 질문을 함께 쓴다. "
             "items 배열의 각 항목은 title,page,readable,quote,location,explanation,detail,action,question,"
-            "attention,attention_reason,role_effect,burden_condition,risk_basis를 포함한다. JSON만 반환하라."
+            "attention,attention_reason,role_effect,burden_condition,risk_basis,legal_review,legal_review_reason를 포함한다. JSON만 반환하라."
         )
         content = [{"type": "input_text", "text": prompt}]
         total_bytes = len(prompt.encode("utf-8"))
@@ -1390,6 +1399,7 @@ def ai_feedback(pages, role, document_type, rules):
             input=[{"role": "user", "content": content}])
         output, rejected = validate_simple_findings(read_ai_json(response), pages)
         rules["simple_rejected"] = rejected
+        rules["missing_clauses"] = find_missing_clauses(pages, output)
         if not output:
             return [], "표시할 설명을 받지 못했습니다. 다시 분석해 주세요."
         return output, "일부 항목의 응답 형식이 맞지 않아 표시하지 못했습니다. 원문과 비교해 주세요." if rejected else None
@@ -1402,6 +1412,27 @@ def ai_feedback(pages, role, document_type, rules):
         rules["ai_elapsed_seconds"] = round(time.monotonic() - started, 1)
 
 
+
+
+def find_missing_clauses(pages, items):
+    """OCR의 조 번호와 표시된 인용의 조 번호를 비교한다. 항·특약 전체 보장은 아니다."""
+    pattern = r"제\s*(\d+)\s*조"
+    missing = []
+    for page, text in enumerate(pages, 1):
+        found = set(re.findall(pattern, text))
+        shown = set()
+        for item in items:
+            if item["page"] == page:
+                shown.update(re.findall(pattern, item["quote"]))
+        for number in sorted(found - shown, key=int):
+            missing.append(f"{page}페이지 제{number}조")
+    return missing
+
+
+def law_review_candidates(items):
+    return [{"page": i["page"], "quote": i["quote"], "concern": i["legal_review_reason"]}
+            for i in items if i["readable"] and i.get("legal_review") is True
+            and isinstance(i.get("legal_review_reason"), str) and i["legal_review_reason"].strip()]
 
 def official_law_url(url):
     try:
@@ -1474,6 +1505,7 @@ def read_law_json(response):
 
 def compare_official_law(result):
     """쉬운 설명과 별도로 공식 법령을 실제 검색한다. 실패 시 기본 결과를 보존한다."""
+    started = time.monotonic()
     stage = "검색 요청 준비"
     result.pop("law_technical_error", None)
     result.pop("law_checked_date", None)
@@ -1481,9 +1513,11 @@ def compare_official_law(result):
         key = st.secrets.get("OPENAI_API_KEY")
         if not key:
             return [], "법령 검색 연결 설정을 확인해 주세요."
-        clauses = [{"page": i["page"], "quote": i["quote"]} for i in result.get("ai_items", []) if i["readable"]]
+        clauses = law_review_candidates(result.get("ai_items", []))
         if not clauses:
-            return [], "읽을 수 있는 원문이 없어 법령을 비교하지 못했습니다."
+            result["law_skipped"] = True
+            return [], None
+        result["law_skipped"] = False
         checked = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         prompt = (
             "국가법령정보센터 law.go.kr에서 대한민국 공식 법령을 실제 검색해 다음 원문 조항과 비교하라. "
@@ -1492,11 +1526,16 @@ def compare_official_law(result):
             "검색일 현재 시행 중인 조문과 시행일을 확인한다. 계약일이 없거나 적용 대상·시점·사실이 부족하면 판단 어려움으로 표시하고 필요한 정보를 질문한다. "
             "개정 예정 조문을 현재 법으로 적용하지 않는다. 서류 종류만으로 법 적용을 단정하지 않는다. "
             "위반 가능성은 구체적 조문과 원문 조건의 충돌을 설명할 때만 표시한다. 해당없음이나 전부 적법하다는 결론을 내리지 않는다. "
-            "짧고 쉬운 한국어로 작성한다. 검색에서 실제 확인한 URL만 쓴다. JSON만 반환한다: "
-            '{"checks":[{"page":1,"quote":"제공된 원문 그대로","status":"위반 가능성 또는 판단 어려움 또는 참고 기준",'
+            "큰 손실·권리 제한과 법령 충돌 의심을 확인하는 데 집중한다. 정상적인 조항의 법률 해설과 참고 기준은 반환하지 않는다. "
+            "법률 본문뿐 아니라 직접 적용되는 시행령·시행규칙·예외를 확인한다. 특정 규정을 찾지 못했다고 권리가 없다고 단정하지 않는다. "
+            "판례를 직접 확인하지 않았다면 판례에 부합한다는 표현을 쓰지 않는다. 과거 법령 페이지를 최신으로 오인하지 않는다. "
+            "explanation은 어려운 법률 용어 없이 사용자의 부담과 이유를 일상어 2~3문장으로 설명한다. 법률명·조문명은 law 필드에 둔다. "
+            "현재 분쟁이나 파손이 발생했다고 가정한 질문은 하지 않는다. 비교 판단에 꼭 필요한 계약 조건만 질문한다. "
+            "검색에서 실제 확인한 URL만 쓴다. JSON만 반환한다: "
+            '{"checks":[{"page":1,"quote":"제공된 원문 그대로","status":"위반 가능성 또는 판단 어려움",'
             '"explanation":"비교한 이유와 적용 조건","law":"법률명과 조문","effective_date":"확인한 시행일",'
             '"url":"공식 법령 URL","question":"더 필요한 정보 없으면 빈 문자열"}]}. '
-            "중요한 쟁점만 최대 5개. 확인할 사항이 없으면 checks는 빈 배열이다.\n"
+            "같은 법률 쟁점은 묶고 중요도 순으로 최대 3개. 확인할 사항이 없으면 checks는 빈 배열이다.\n"
             f"검색일: {checked}. 문서: {result['selected_document_type']}. 사용자: {result['user_role']}.\n"
             + json.dumps(clauses, ensure_ascii=False)
         )
@@ -1540,11 +1579,11 @@ def compare_official_law(result):
         stage = "원문과 법령 근거 연결"
         checks = []
         rejected = 0
-        for item in data["checks"][:5]:
+        for item in data["checks"][:3]:
             required = ("quote", "status", "explanation", "law", "effective_date", "url", "question")
             if (not isinstance(item, dict) or any(not isinstance(item.get(k), str) for k in required)
                 or type(item.get("page")) is not int
-                or item.get("status") not in ("위반 가능성", "판단 어려움", "참고 기준")
+                or item.get("status") not in ("위반 가능성", "판단 어려움")
                 or item.get("url") not in sources
                 or not all(item.get(k, "").strip() for k in ("law", "effective_date", "explanation"))
                 or not any(item["page"] == c["page"] and item["quote"] == c["quote"] for c in clauses)):
@@ -1556,6 +1595,8 @@ def compare_official_law(result):
     except Exception as exc:
         result["law_technical_error"] = type(exc).__name__
         return [], law_failure_message(exc, stage)
+    finally:
+        result["law_seconds"] = round(time.monotonic() - started, 1)
 
 def image_data_url(image_bytes):
     """EXIF 방향을 적용하고 사진 입력을 JPEG로 통일한다."""
@@ -1618,7 +1659,7 @@ if images:
     document_signature = hashlib.sha256(b"".join(hashlib.sha256(data).digest() for data in images)).hexdigest()
     if st.session_state.get("document_signature") != document_signature:
         st.session_state.pop("simple_document_reading_v3", None)
-        st.session_state.pop("simple_analysis_result_v20", None)
+        st.session_state.pop("simple_analysis_result_v21", None)
         st.session_state.document_signature = document_signature
     if st.button("문서 읽기", type="primary"):
         analysis_started = time.perf_counter()
@@ -1655,7 +1696,7 @@ if images:
             "pages": page_texts, "ocr_records": ocr_records, "images": list(images), "combined": combined,
             "identified": identified, "error": identification_error,
             "seconds": time.perf_counter() - analysis_started}
-        st.session_state.pop("simple_analysis_result_v20", None)
+        st.session_state.pop("simple_analysis_result_v21", None)
         st.rerun()
     reading = st.session_state.get("simple_document_reading_v3")
     if reading:
@@ -1665,7 +1706,7 @@ if images:
         role = st.selectbox("누구의 입장에서 볼까요?", ROLE_OPTIONS[doc_choice], index=None, placeholder="나의 입장을 선택하세요", key=f"role_{document_signature}_{doc_choice}")
         input_signature = hashlib.sha256((document_signature + "|" + doc_choice + "|" + str(role)).encode()).hexdigest()
         if st.session_state.get("analysis_signature") != input_signature:
-            st.session_state.pop("simple_analysis_result_v20", None)
+            st.session_state.pop("simple_analysis_result_v21", None)
         if st.button("선택한 입장으로 분석", type="primary", disabled=role is None):
             result = analyze_contract_text(reading["combined"], role)
             result.update(user_role=role, selected_document_type=doc_choice,
@@ -1673,15 +1714,15 @@ if images:
                           ai_items=[], ai_error=None, ai_pending=True,
                           ocr_records=reading["ocr_records"],
                           ocr_seconds=reading["seconds"], document_identification=identified)
-            st.session_state.simple_analysis_result_v20 = result
+            st.session_state.simple_analysis_result_v21 = result
             st.session_state.analysis_signature = input_signature
             st.rerun()
 else:
     st.session_state.pop("simple_document_reading_v3", None)
-    st.session_state.pop("simple_analysis_result_v20", None)
+    st.session_state.pop("simple_analysis_result_v21", None)
     st.session_state.pop("document_signature", None)
 
-result = st.session_state.get("simple_analysis_result_v20")
+result = st.session_state.get("simple_analysis_result_v21")
 if result:
     st.subheader("계약 내용 쉽게 읽기")
     ai_status = st.empty()
@@ -1730,14 +1771,18 @@ if result:
             with st.expander(f"{item['title']} 사진 확인"):
                 st.caption(item["location"])
                 st.image(result["source_images"][item["page"] - 1], width=600)
+    if result.get("missing_clauses"):
+        st.info("설명에서 확인되지 않은 조항: " + ", ".join(result["missing_clauses"]) + ". 원문을 확인하거나 다시 분석해 주세요.")
     if items and not result.get("ai_pending"):
         st.subheader("공식 법령과 비교해 확인할 내용")
         if result.get("law_pending"):
             st.info("공식 법령을 검색하고 있습니다. 위의 쉬운 설명을 먼저 확인할 수 있습니다.")
         elif result.get("law_error"):
             st.info(result["law_error"])
+        elif result.get("law_skipped"):
+            st.write("이번 원문 분석에서 법령 비교가 필요한 중대한 위험 의심 항목을 찾지 못해 추가 검색을 생략했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
         elif not result.get("law_checks"):
-            st.write("이번 검색에서 표시할 비교 항목을 찾지 못했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
+            st.write("이번 분석에서 중요한 위험 의심 항목을 찾지 못했습니다. 모든 조항의 적법성을 확인한 결과는 아닙니다.")
         for check in result.get("law_checks", []):
             with st.container(border=True):
                 st.write(check["status"])
@@ -1755,6 +1800,7 @@ if result:
             result["law_error"] = None
             st.rerun()
     if items and not result.get("ai_pending") and not result.get("law_pending"):
+        st.caption(f"쉬운 설명 {result.get('ai_seconds', 0):.1f}초 · 법령 비교 {result.get('law_seconds', 0):.1f}초")
         st.download_button("설명 PDF 저장", create_pdf_report(result),
                            file_name="bridge_analysis.pdf", mime="application/pdf")
         st.caption("AI가 사진을 읽어 설명합니다. 금액·날짜·선택 표시는 원본과 비교해 주세요.")
@@ -1766,13 +1812,13 @@ if result:
                                                   result["selected_document_type"], result)
         result.update(ai_items=ai_items, ai_error=ai_error,
                       ai_pending=False, ai_seconds=time.perf_counter() - ai_started,
-                      law_pending=bool(ai_items), law_checks=[], law_error=None)
-        st.session_state.simple_analysis_result_v20 = result
+                      law_pending=bool(ai_items), law_checks=[], law_error=None, law_skipped=False, law_seconds=0)
+        st.session_state.simple_analysis_result_v21 = result
         st.rerun()
 
     if items and result.get("law_pending") and not result.get("ai_pending"):
         with st.spinner("공식 법령과 비교하고 있습니다"):
             checks, error = compare_official_law(result)
         result.update(law_checks=checks, law_error=error, law_pending=False)
-        st.session_state.simple_analysis_result_v20 = result
+        st.session_state.simple_analysis_result_v21 = result
         st.rerun()
