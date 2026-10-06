@@ -22,7 +22,8 @@ from google.cloud import vision
 from google.oauth2 import service_account
 
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, LongTable, TableStyle
+from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
 
@@ -979,32 +980,25 @@ def create_pdf_report(analysis_result):
     paragraph(f"문서: {analysis_result.get('selected_document_type', '기타')}")
     if analysis_result.get("user_role"):
         paragraph(f"선택한 입장: {role_label(analysis_result['user_role'])}")
+    cell = ParagraphStyle("TableCell", fontName=font_name, fontSize=9, leading=14, wordWrap="CJK")
+    def para(value):
+        return Paragraph(escape(str(value or "")).replace("\n", "<br/>"), cell)
+    data = [[para("확인할 항목"), para("쉬운 설명"), para("내 입장에서 확인할 내용")]]
     for item in analysis_result.get("ai_items", []):
-        title = ("설명 보류: " if item.get("explanation_error") else "읽기 어려운 부분: ") + item["title"] if not item["readable"] else item["title"]
-        paragraph(title, "Heading2")
-        if item.get("problem"):
-            paragraph("확인할 내용: " + item["problem_reason"])
-        paragraph("쉬운 설명")
-        paragraph(item["explanation"])
-        if item.get("role_note"):
-            paragraph(f"내 입장({role_label(analysis_result.get('user_role'))})에서 확인할 내용: {item['role_note']}")
-        if item.get("other_role_note"):
-            other = analysis_result.get("other_role") or other_role(
-                analysis_result.get("user_role"),
-                ROLE_OPTIONS.get(analysis_result.get("selected_document_type"), ROLE_OPTIONS["기타"]))
-            paragraph(f"상대방({role_label(other)}) 입장: {item['other_role_note']}")
-        for term in item.get("terms", []):
-            paragraph(f"용어 풀이 · {term['term']}: {term['plain']}")
-        if item.get("action"):
-            paragraph(f"추가 확인 제안: {item['action']}")
-        if item.get("detail"):
-            paragraph("자세한 내용", "Heading3")
-            paragraph(item["detail"])
-        if item.get("question"):
-            paragraph(f"확인할 질문: {item['question']}")
-        paragraph(f"대화 위치: {item['location']}" if analysis_result.get("source_kind") == "audio" else f"원본 위치: {item['page']}페이지 · {item['location']}")
-        if analysis_result.get("source_kind") == "audio":
-            paragraph("대화 원문: " + item["quote"])
+        status = result_status(item)
+        title = item["title"] + ("\n" + status if status else "")
+        data.append([para(title), para(item["explanation"]), para(item.get("role_note") or "별도 표시 없음")])
+    if len(data) > 1:
+        table = LongTable(data, colWidths=[doc.width*.23, doc.width*.49, doc.width*.28], repeatRows=1, splitInRow=1)
+        table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#eef2f7")),("GRID",(0,0),(-1,-1),.4,colors.HexColor("#d9dfe7")),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+        story.extend([table, Spacer(1,16)])
+    for item in analysis_result.get("ai_items", []):
+        extras = [(label,item.get(key)) for label,key in (("확인할 내용", "problem_reason"),("확인 제안","action"),("확인할 질문","question"),("자세한 내용","detail"),("상대방 입장","other_role_note")) if item.get(key)]
+        if extras or item.get("terms"):
+            paragraph(item["title"] + " · 상세 내용", "Heading2")
+            for label,value in extras: paragraph(label + ": " + value)
+            for term in item.get("terms",[]): paragraph(term["term"] + ": " + term["plain"])
+        paragraph("원문 위치: " + item.get("location", ""))
     if analysis_result.get("missing_clauses"):
         paragraph("설명에서 확인되지 않은 조항: " + ", ".join(analysis_result["missing_clauses"]))
     if analysis_result.get("ai_error"):
@@ -1499,19 +1493,7 @@ def render_audio_mode():
         st.subheader("대화 내용 쉽게 읽기")
         if report.get("ai_error"):
             st.info(report["ai_error"])
-        for item in report["ai_items"]:
-            with st.container(border=True):
-                st.write(item["title"])
-                st.write(item["explanation"])
-                if item["problem"]:
-                    st.caption("확인할 내용")
-                    st.write(item["problem_reason"])
-                if item["action"]:
-                    st.write(item["action"])
-                if item["question"]:
-                    st.write(item["question"])
-                with st.expander("대화 원문 보기"):
-                    st.text(item["quote"])
+        render_result_table(report["ai_items"])
         st.download_button("설명 PDF 저장", create_pdf_report(report), file_name="bridge_audio_analysis.pdf", mime="application/pdf")
         st.caption("음성에서 옮긴 대화를 기준으로 설명합니다. 금액·날짜·동의 여부는 녹음과 비교해 주세요.")
     st.stop()
@@ -1689,6 +1671,34 @@ def image_data_url(image_bytes):
 
 def markdown_safe(text):
     return re.sub(r"([\\`*_{}\[\]()#+\-.!|>~])", r"\\\1", str(text))
+
+
+def result_status(item):
+    return "설명 보류" if item.get("explanation_error") else ("원문 확인 필요" if not item.get("readable", True) else ("확인할 내용 있음" if item.get("problem") else ""))
+
+
+def render_result_table(items, role=None, other=None, images=None):
+    """HTML을 이스케이프하고 동일 데이터를 표 또는 모바일 카드로 표시한다."""
+    def e(value):
+        return escape(str(value or "")).replace("\n", "<br>")
+    rows = []
+    for item in items:
+        status = result_status(item)
+        extra = ""
+        for label, key in (("확인할 내용", "problem_reason"), ("확인 제안", "action"), ("확인할 질문", "question"), ("자세한 내용", "detail"), ("상대방 입장", "other_role_note")):
+            if item.get(key):
+                extra += f"<p><strong>{label}</strong><br>{e(item[key])}</p>"
+        if item.get("terms"):
+            extra += "<p><strong>어려운 말 풀이</strong><br>" + "<br>".join(e(t["term"])+": "+e(t["plain"]) for t in item["terms"]) + "</p>"
+        extra += "<p><strong>원문</strong><br>"+e(item.get("quote"))+"<br>"+e(item.get("location"))+"</p>"
+        detail = "<details><summary>상세 내용과 원문 보기</summary>"+extra+"</details>"
+        rows.append("<tr><td data-label='확인할 항목'><strong>"+e(item["title"])+"</strong>"+("<p class='result-status'>"+e(status)+"</p>" if status else "")+"</td><td data-label='쉬운 설명'>"+e(item["explanation"])+detail+"</td><td data-label='내 입장에서 확인할 내용'>"+e(item.get("role_note") or "별도 표시 없음")+"</td></tr>")
+    css = """<style>.result-table{width:100%;border-collapse:collapse;table-layout:fixed}.result-table th,.result-table td{border:1px solid #d9dfe7;padding:14px;vertical-align:top;overflow-wrap:anywhere;line-height:1.65}.result-table th{background:#eef2f7;color:#172b46;text-align:left}.result-table details{margin-top:12px}.result-table summary{cursor:pointer}.result-status{font-weight:600;color:#995100}@media(max-width:700px){.result-table thead{display:none}.result-table,.result-table tbody,.result-table tr,.result-table td{display:block;width:auto}.result-table tr{border:1px solid #d9dfe7;border-radius:8px;margin-bottom:16px}.result-table td{border:0;border-bottom:1px solid #eef2f7}.result-table td:before{content:attr(data-label);display:block;font-weight:600;margin-bottom:6px}}</style>"""
+    st.markdown(css+"<table class='result-table'><colgroup><col style='width:23%'><col style='width:49%'><col style='width:28%'></colgroup><thead><tr><th>확인할 항목</th><th>쉬운 설명</th><th>내 입장에서 확인할 내용</th></tr></thead><tbody>"+"".join(rows)+"</tbody></table>", unsafe_allow_html=True)
+    if images:
+        with st.expander("원본 사진 보기"):
+            for n, image_bytes in enumerate(images, 1):
+                st.image(image_bytes, caption=f"{n}페이지", width=600)
 
 
 def render_role_and_terms(item, role, other):
@@ -1907,38 +1917,7 @@ if result:
     items = result.get("ai_items", [])
     my_role = result.get("user_role")
     their_role = other_role(my_role, ROLE_OPTIONS.get(result.get("selected_document_type"), ROLE_OPTIONS["기타"]))
-    render_role_summary(items, my_role)
-    readable = [item for item in items if item["readable"]]
-    unclear = [item for item in items if not item["readable"]]
-    for number, item in enumerate(readable, 1):
-        with st.container(border=True):
-            st.write(f"{number}. {item['title']}")
-            st.caption("쉬운 설명")
-            st.write(item["explanation"])
-            if item.get("problem"):
-                st.caption("확인할 내용")
-                st.write(item["problem_reason"])
-            render_role_and_terms(item, my_role, their_role)
-            if item.get("action"):
-                st.caption("확인 제안")
-                st.write(item["action"])
-            if item["question"]:
-                st.write(f"확인할 질문: {item['question']}")
-            if item.get("detail"):
-                with st.expander("자세히 보기"):
-                    st.write(item["detail"])
-            with st.expander("원문과 사진 보기"):
-                st.caption(f"{item['page']}페이지 · {item['location']}")
-                st.text(item["quote"])
-                st.image(result["source_images"][item["page"] - 1], width=600)
-    if unclear:
-        st.subheader("확인이 필요한 부분")
-        for item in unclear:
-            st.write(f"{item['page']}페이지 · {item['title']}: {item['explanation']}")
-            st.write(item["question"])
-            with st.expander(f"{item['title']} 사진 확인"):
-                st.caption(item["location"])
-                st.image(result["source_images"][item["page"] - 1], width=600)
+    render_result_table(items, my_role, their_role, result.get("source_images"))
     if result.get("missing_clauses"):
         st.info("설명에서 확인되지 않은 조항: " + ", ".join(result["missing_clauses"]) + ". 원문을 확인하거나 다시 분석해 주세요.")
     if items and not result.get("ai_pending"):
